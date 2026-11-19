@@ -32,7 +32,7 @@ npm run dev
 
 Open the local URL printed by Vite, normally `http://localhost:5173`.
 
-Keep API keys in the ignored `.env` file. Gemini requests have a configurable timeout; if model review is unavailable, analysis continues with a labelled local rule review. Chat returns source excerpts when model generation is unavailable. Tavily provides optional official-source research.
+Keep API keys in the ignored `.env` file. Gemini requests have a configurable timeout; if model review is unavailable, analysis continues with a labelled local rule review. Chat uses the default model when none is specified and returns source excerpts when generation is unavailable. Choose “Local source excerpts” to skip model generation explicitly. Tavily provides optional official-source research.
 
 On Windows, use the existing `start.cmd` / `start.ps1` setup scripts and `stop.cmd` / `stop.ps1` stop scripts.
 

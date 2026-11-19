@@ -75,3 +75,39 @@ def test_retrieval_uses_original_question_if_rewrite_unavailable(monkeypatch):
     monkeypatch.setattr(main, 'generate', unavailable)
     history = [SimpleNamespace(role='user', content='Who pays the rent?')]
     assert main.standalone_retrieval_query('When is it due?', history, 'gemini-test') == 'When is it due?'
+
+
+@pytest.mark.parametrize('workspace', [False, True])
+@pytest.mark.parametrize('requested_model,expected_model', [(None, 'gemini-default'), ('local', None), ('gemini-chosen', 'gemini-chosen')])
+def test_chat_model_defaults_preserve_explicit_selection(monkeypatch, local_contract, workspace, requested_model, expected_model):
+    from backend.app import retrieval
+    _, meta, chunk = local_contract
+    calls = []
+    catalog_calls = []
+    monkeypatch.setattr(retrieval, 'HybridRetriever', lambda *a, **k: SimpleNamespace(search=lambda *a, **k: [chunk]))
+    def available():
+        catalog_calls.append(True)
+        return ['catalog']
+    monkeypatch.setattr(main, 'available_models', available)
+    monkeypatch.setattr(main, 'default_model', lambda models: 'gemini-default')
+    def generate(prompt, schema, model):
+        calls.append(model)
+        if model is None:
+            return None
+        return {'answer': 'The notice period is sixty days.', 'cited_chunk_ids': [chunk.chunk_id]}
+    monkeypatch.setattr(main, 'generate', generate)
+    body = {'message': 'What is the notice period?'}
+    if requested_model is not None:
+        body['model'] = requested_model
+    if workspace:
+        body['contract_ids'] = [meta.contract_id]
+    route = '/api/workspace/chat' if workspace else f'/api/contracts/{meta.contract_id}/chat'
+    response = TestClient(main.app).post(route, json=body)
+    assert response.status_code == 200
+    assert calls == [expected_model]
+    assert bool(catalog_calls) == (requested_model is None)
+    result = response.json()
+    assert result['model'] == expected_model
+    assert result['citations'][0]['chunk_id'] == chunk.chunk_id
+    if requested_model == 'local':
+        assert 'Relevant retrieved excerpts' in result['content']

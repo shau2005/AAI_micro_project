@@ -427,6 +427,7 @@ def review(cid:str,req:ReviewRequest,background_tasks: BackgroundTasks,x_workspa
     return {"status":"queued","contract_id":cid,"analysis_progress":0,"analysis_stage":"Queued for review"}
 @app.post("/api/contracts/{cid}/chat")
 def chat(cid:str,req:ChatRequest,x_workspace_id: str = Header(default="default")):
+    req.model = None if req.model == "local" else req.model or default_model(available_models())
     try: chunks=store.load_chunks(cid); scoped_meta(cid,x_workspace_id)
     except (KeyError,FileNotFoundError): raise HTTPException(404,"Contract not found or not indexed")
     history=store.messages(cid)
@@ -463,6 +464,7 @@ def workspace_messages(x_workspace_id: str = Header(default="default")):
     return [m.model_dump() for m in store.workspace_messages(x_workspace_id)]
 @app.post("/api/workspace/chat")
 def workspace_chat(req:WorkspaceChatRequest,x_workspace_id: str = Header(default="default")):
+    req.model = None if req.model == "local" else req.model or default_model(available_models())
     ids=list(dict.fromkeys(req.contract_ids))
     if not ids: raise HTTPException(400,"Select at least one contract")
     selected=[]
