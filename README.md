@@ -1,4 +1,6 @@
-# PS-9 — Legal Contract Review Agent
+# AAI_micro_project — Legal Contract Review Agent
+
+Based on [moneet9/LEGAL-CONTRACT-REVIEW-AGENT-](https://github.com/moneet9/LEGAL-CONTRACT-REVIEW-AGENT-), with fixes for graph extraction, evidence citations, date detection, document classification, and obligation roles.
 
 Evidence-grounded contract review prototype with FastAPI, React, SQLite/filesystem persistence, local embeddings, hybrid retrieval, supervised analysis agents, a contract relationship graph, and an autonomous review workflow. Gemini models appear when a Gemini API key is configured; Ollama models are also discovered when running.
 
