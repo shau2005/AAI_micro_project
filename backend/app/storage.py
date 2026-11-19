@@ -76,10 +76,21 @@ class LocalStore:
     def audit(self,event):
         event={**event,"timestamp":datetime.now(timezone.utc).isoformat()}
         with (self.root/"audit"/"events.jsonl").open("a",encoding="utf-8") as f: f.write(json.dumps(event)+"\n")
-    def save_graph(self, cid, graph):
-        (self.root/"indexes"/f"{cid}.graph.json").write_text(json.dumps(graph, ensure_ascii=False), encoding="utf-8")
-    def load_graph(self, cid):
-        path = self.root/"indexes"/f"{cid}.graph.json"
+    def save_artifacts(self, cid, artifacts):
+        (self.root/"indexes"/f"{cid}.review.json").write_text(json.dumps(artifacts, ensure_ascii=False), encoding="utf-8")
+    def load_artifacts(self, cid):
+        path = self.root/"indexes"/f"{cid}.review.json"
+        if not path.exists():
+            # Read earlier saved reviews without exposing retired graph data.
+            # Leave the historical files intact for the restoration checkpoint.
+            path = self.root/"indexes"/f"{cid}.graph.json"
         if not path.exists(): return None
-        return json.loads(path.read_text(encoding="utf-8"))
+        artifacts = json.loads(path.read_text(encoding="utf-8"))
+        artifacts.pop("graph", None)
+        artifacts.pop("graph_review", None)
+        if "fixer" in artifacts:
+            artifacts["fixer"] = {key: value for key, value in artifacts["fixer"].items()
+                                  if key not in {"edges_removed", "nodes_removed"}}
+        return artifacts
+
 store=LocalStore()

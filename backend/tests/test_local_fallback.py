@@ -40,10 +40,10 @@ def test_review_finishes_with_local_rules_if_model_unavailable(monkeypatch, loca
     saved = storage.get_meta(meta.contract_id)
     assert saved.analysis_status == 'complete'
     assert saved.selected_model == ''
-    graph = storage.load_graph(meta.contract_id)
-    assert graph['graph']['extraction']['method'] == 'local-rules'
-    assert set(graph['perspective_reviews']) == {'contract_giver', 'contract_acceptor'}
-    for review in graph['perspective_reviews'].values():
+    artifacts = storage.load_artifacts(meta.contract_id)
+    assert 'graph' not in artifacts
+    assert set(artifacts['perspective_reviews']) == {'contract_giver', 'contract_acceptor'}
+    for review in artifacts['perspective_reviews'].values():
         assert review['findings']
         assert all('offline rule-based' in finding['reasoning'] for finding in review['findings'])
 

@@ -13,45 +13,12 @@ def chunk(text, cid="test-contract", index=1):
                  page_start=1, page_end=1, text=text)
 
 
-def graph_result():
-    proof = [{"page": 1, "quote": "Donor shall transfer Property to Donee."}]
-    return {"entities": [
-        {"name": "Donor", "kind": "party", "evidence": proof},
-        {"name": "Donee", "kind": "party", "evidence": proof}],
-        "relationships": [
-            {"source": "Donor", "target": "Donee", "relation": "TRANSFERS_TO", "evidence": proof},
-            {"source": "Unknown", "target": "Donee", "relation": "OWES", "evidence": proof}]}
 
 
-def test_graph_keeps_grounded_links_when_last_relation_has_missing_endpoint(monkeypatch):
-    monkeypatch.setattr(gemini, "generate", lambda *a, **k: graph_result())
-    c = chunk("Donor shall transfer Property to Donee.")
-    graph = agents.build_graph([c], "gemini-test")
-    assert graph["extraction"]["method"] == "whole-contract-model-evidence-checked"
-    assert graph["extraction"]["input_chars"] > len(c.text)
-    assert len(graph["nodes"]) == 2
-    assert len(graph["edges"]) == 1
-    assert graph["edges"][0]["relation"] == "TRANSFERS_TO"
 
 
-@pytest.mark.parametrize("bad_result", [None, {"entities": None, "relationships": []},
-    {"entities": [{"name": "Invented", "kind": "party", "evidence": [{"page": 1, "quote": "Invented"}]}], "relationships": []}])
-def test_unusable_model_graph_uses_fallback(monkeypatch, bad_result):
-    monkeypatch.setattr(gemini, "generate", lambda *a, **k: bad_result)
-    graph = agents.build_graph([chunk("Donor shall transfer Property to Donee.")], "gemini-test")
-    assert graph["extraction"]["method"] == "local-fallback"
-    assert graph["extraction"]["warning"]
 
 
-def test_malformed_graph_items_are_ignored(monkeypatch):
-    result = graph_result()
-    result["entities"].insert(0, None)
-    result["entities"][1]["evidence"].insert(0, None)
-    result["relationships"].insert(0, "invalid")
-    monkeypatch.setattr(gemini, "generate", lambda *a, **k: result)
-    graph = agents.build_graph([chunk("Donor shall transfer Property to Donee.")], "gemini-test")
-    assert len(graph["edges"]) == 1
-    assert graph["extraction"]["method"] == "whole-contract-model-evidence-checked"
 
 
 def test_gemini_retries_transient_generation_failure(monkeypatch):
@@ -137,31 +104,3 @@ def test_multiple_duties_keep_their_respective_subjects():
 
 def test_free_will_is_not_an_obligation():
     assert agents.extract_obligations([chunk("The parties sign of their own free will without coercion.")])["obligations"] == []
-
-
-def test_graph_schema_constrains_entity_types_to_supported_types(monkeypatch):
-    def generate(prompt, schema, *args, **kwargs):
-        enum = schema["properties"]["entities"]["items"]["properties"]["kind"]["enum"]
-        assert "party" in enum and "term" in enum
-        assert "Individual" not in enum and "Defined Term" not in enum
-        return graph_result()
-    monkeypatch.setattr(gemini, "generate", generate)
-    graph = agents.build_graph([chunk("Donor shall transfer Property to Donee.")], "gemini-test")
-    assert graph["extraction"]["method"] == "whole-contract-model-evidence-checked"
-
-
-def test_graph_retries_ungrounded_output_before_fallback(monkeypatch):
-    responses = iter([{"entities": [], "relationships": []}, graph_result()])
-    monkeypatch.setattr(agents.settings, "max_retries", 1)
-    monkeypatch.setattr(gemini, "generate", lambda *a, **k: next(responses))
-    graph = agents.build_graph([chunk("Donor shall transfer Property to Donee.")], "gemini-test")
-    assert graph["extraction"]["method"] == "whole-contract-model-evidence-checked"
-    assert len(graph["edges"]) == 1
-
-
-def test_graph_without_grounded_relationships_is_not_reported_as_success(monkeypatch):
-    result = graph_result()
-    result["relationships"] = []
-    monkeypatch.setattr(gemini, "generate", lambda *a, **k: result)
-    graph = agents.build_graph([chunk("Donor shall transfer Property to Donee.")], "gemini-test")
-    assert graph["extraction"]["method"] == "local-fallback"

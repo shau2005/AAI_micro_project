@@ -1,3 +1,5 @@
+> Historical architecture reference: Graph RAG has been removed from the current baseline. See README.md and docs/GRAPH_RAG_RESTORE.md for the active workflow and restoration plan.
+
 # PS-9 Contract Review Agent — Project Details
 
 ## 1. What the project does
