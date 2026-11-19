@@ -431,7 +431,7 @@ def chat(cid:str,req:ChatRequest,x_workspace_id: str = Header(default="default")
         selected_hits=hits[:4]
     store.audit({"contract_id":cid,"workspace_id":x_workspace_id,"agent":"AnswerGenerator","action":"completed","status":"healthy","detail":f"{'Answered with' if grounded_answer else 'No grounded answer; returned evidence excerpts from'} {len(selected_hits)} source chunk(s)."})
     retrieval_trace={"query":retrieval_query,"candidate_chunk_ids":[h.chunk_id for h in hits],"answer_chunk_ids":[h.chunk_id for h in selected_hits],"graph_facts":graph_facts}
-    evidence=[{"page":h.page_start,"clause":h.clause,"quote":h.text[:380],"chunk_id":h.chunk_id} for h in selected_hits]
+    evidence=[{"page":h.page_start,"clause":h.clause,"quote":h.text,"chunk_id":h.chunk_id} for h in selected_hits]
     text=(answer if grounded_answer else fallback_chat_answer(req.message,[(None,h) for h in selected_hits]))
     payload=store.save_message(cid,"assistant",text,evidence,req.model).model_dump(); payload["retrieval_trace"]=retrieval_trace
     return payload
@@ -483,7 +483,7 @@ def workspace_chat(req:WorkspaceChatRequest,x_workspace_id: str = Header(default
     if not grounded_answer:
         selected_hits=[hit for _,hit in all_hits[:4]]
     retrieval_trace={"queries":retrieval_queries,"candidate_chunk_ids":[hit.chunk_id for _,hit in all_hits],"answer_chunk_ids":[hit.chunk_id for hit in selected_hits],"graph_facts":"Graph facts were supplied per contract in the answer context."}
-    evidence=[{"page":hit.page_start,"clause":hit.clause,"quote":f"{hit.text[:360]}","chunk_id":hit.chunk_id} for hit in selected_hits]
+    evidence=[{"page":hit.page_start,"clause":hit.clause,"quote":hit.text,"chunk_id":hit.chunk_id} for hit in selected_hits]
     text=(answer.strip() if grounded_answer else fallback_chat_answer(req.message,[(None,hit) for hit in selected_hits]))
     for cid,_,_ in selected:
         store.audit({"contract_id":cid,"workspace_id":x_workspace_id,"agent":"AnswerGenerator","action":"completed","status":"healthy","detail":f"{'Answered with' if grounded_answer else 'No grounded answer; returned evidence excerpts from'} {len(selected_hits)} source chunk(s)."})
