@@ -1,7 +1,12 @@
 import json, time
 import httpx
+from requests.exceptions import Timeout as RequestsTimeout
 from .config import settings
 class ModelGenerationError(RuntimeError):
+    # The model client owns retries; do not multiply them in the orchestrator.
+    retryable = False
+
+class ModelTimeoutError(ModelGenerationError):
     pass
 
 class GeminiClient:
@@ -9,7 +14,7 @@ class GeminiClient:
         self.available=bool(settings.gemini_api_key); self.client=None
         if self.available:
             from google import genai
-            self.client=genai.Client(api_key=settings.gemini_api_key)
+            self.client=genai.Client(api_key=settings.gemini_api_key, http_options={"timeout": int(settings.gemini_timeout_seconds * 1000)})
     def generate_structured(self,prompt,schema,model=None,temperature=None):
         if not self.client: return None
         for attempt in range(settings.max_retries+1):
@@ -18,8 +23,19 @@ class GeminiClient:
                 if temperature is not None: config["temperature"]=temperature
                 response=self.client.models.generate_content(model=model or settings.gemini_model,contents=prompt,config=config)
                 return json.loads(response.text)
-            except Exception:
-                if attempt>=settings.max_retries: raise
+            except (RequestsTimeout, httpx.TimeoutException) as error:
+                raise ModelTimeoutError(
+                    f"Gemini did not respond within {settings.gemini_timeout_seconds:g} seconds. "
+                    "Retry the review or choose another review model."
+                ) from error
+            except Exception as error:
+                code = getattr(error, "code", None)
+                if attempt>=settings.max_retries or code in {400, 401, 403, 404}:
+                    status = f"HTTP {code}" if code else type(error).__name__
+                    advice = "The selected model is unavailable. Choose another review model." if code == 404 else "Check API key access." if code in {401, 403} else "Retry the review or choose another review model."
+                    raise ModelGenerationError(
+                        f"Gemini generation failed ({status}) after {attempt+1} attempt(s). {advice}"
+                    ) from error
                 time.sleep(2**attempt)
 
 def available_models() -> list[dict[str, str]]:
@@ -27,7 +43,7 @@ def available_models() -> list[dict[str, str]]:
     if settings.gemini_api_key:
         try:
             from google import genai
-            client = genai.Client(api_key=settings.gemini_api_key)
+            client = genai.Client(api_key=settings.gemini_api_key, http_options={"timeout": 10000})
             for model in client.models.list():
                 name = str(getattr(model, "name", "")).removeprefix("models/")
                 actions = list(getattr(model, "supported_actions", []) or [])

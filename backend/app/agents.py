@@ -119,11 +119,14 @@ def classify_contract(chunks: list[Chunk], model: str | None = None, document_na
 class MasterAgent:
     """Supervises independent agents with bounded retry and audit telemetry."""
 
-    def __init__(self, *, max_retries: int = 2):
+    def __init__(self, *, max_retries: int = 2, on_progress: Callable[[str], None] | None = None):
         self.max_retries = max(0, max_retries)
+        self.on_progress = on_progress
 
     def execute(self, name: str, ctx: AgentContext, action: Callable[[], Any]) -> Any:
         attempts = self.max_retries + 1
+        if self.on_progress:
+            self.on_progress(name)
         started = time.perf_counter()
         last_error = None
         for attempt in range(1, attempts + 1):
@@ -138,11 +141,14 @@ class MasterAgent:
                 return result
             except Exception as error:  # noqa: BLE001 - supervisor must record all agent failures
                 last_error = error
+                retry = attempt < attempts and getattr(error, "retryable", True)
                 store.audit({"contract_id": ctx.contract_id, "workspace_id": ctx.workspace_id,
-                             "agent": name, "action": "retry" if attempt < attempts else "failed",
+                             "agent": name, "action": "retry" if retry else "failed",
                              "attempt": attempt, "error": f"{type(error).__name__}: {error}"[:1000],
                              "status": "degraded"})
-        raise AgentFailure(f"{name} failed after {attempts} attempt(s): {last_error}")
+                if not retry:
+                    break
+        raise AgentFailure(f"{name} failed after {attempt} attempt(s): {last_error}")
 
     def execute_parallel(self, jobs: dict[str, Callable[[], Any]], ctx: AgentContext) -> dict[str, Any]:
         """Run independent checks concurrently while keeping supervised retries and telemetry."""

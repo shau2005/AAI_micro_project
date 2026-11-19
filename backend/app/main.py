@@ -216,12 +216,15 @@ def standalone_retrieval_query(message, history, model):
     previous_questions="\n".join(
         item.content[:800] for item in history[-4:] if item.role == "user"
     )
-    result=generate(
-        "Rewrite the latest user question as one standalone contract-search query. Resolve pronouns from earlier user questions only. "
-        "Do not answer the question or add facts.\nEarlier user questions:\n"+previous_questions+"\nLatest question:\n"+message,
-        {"type":"object","properties":{"query":{"type":"string"}},"required":["query"]},
-        model,
-    )
+    try:
+        result=generate(
+            "Rewrite the latest user question as one standalone contract-search query. Resolve pronouns from earlier user questions only. "
+            "Do not answer the question or add facts.\nEarlier user questions:\n"+previous_questions+"\nLatest question:\n"+message,
+            {"type":"object","properties":{"query":{"type":"string"}},"required":["query"]},
+            model,
+        )
+    except ModelGenerationError:
+        return message
     return str((result or {}).get("query") or message).strip()
 
 def index_contract(cid, content, workspace_id, model, perspective="contract_giver"):
@@ -353,15 +356,37 @@ def run_review(cid, chunks, meta, req):
         ctx=AgentContext(contract_id=cid,workspace_id=meta.workspace_id,chunks=chunks)
         ctx.artifacts["model"] = req.model
         ctx.artifacts["document_name"] = meta.original_filename
-        master=MasterAgent(max_retries=int(meta.document_config.get("max_retries", settings.max_retries)))
+        def update_review_stage(agent):
+            parallel = {"GraphBuilder", "ContractStructurer", "SignatureVerifier", "IntentAgent", "DeadlineAgent", "ObligationAgent"}
+            local_checks = {"CoverageAgent", "DocumentQualityAgent", "SensitiveDataAgent"}
+            stages = {
+                "ContractClassifierAgent": (15, "Identifying the document type"),
+                "GovernmentResearchAgent": (25, "Looking up official legal sources"),
+                "InitialScan": (35, "Scanning contract risks for both parties"),
+                "GraphValidator": (65, "Validating contract relationships"),
+                "GraphReviewerAgent": (68, "Reviewing relationship evidence"),
+                "TemplateReviewAgent": (75, "Checking the document template"),
+                "FixerAgent": (80, "Checking findings against source evidence"),
+                "CrossChecker": (85, "Cross-checking both party reports"),
+                "ContractScorer": (90, "Calculating review scores"),
+            }
+            progress, stage = (45, "Checking signatures, duties, dates and relationships") if agent in parallel else (70, "Checking document quality and clause coverage") if agent in local_checks else stages.get(agent, (meta.analysis_progress, meta.analysis_stage))
+            meta.analysis_progress = max(meta.analysis_progress, progress)
+            meta.analysis_stage = stage
+            store.update_meta(meta)
+        master=MasterAgent(max_retries=int(meta.document_config.get("max_retries", settings.max_retries)), on_progress=update_review_stage)
         ctx.artifacts["document_config"] = meta.document_config
+        def local_findings(error=None):
+            meta.selected_model=""
+            ctx.artifacts["model"]=""
+            store.update_meta(meta)
+            if error is not None:
+                store.audit({"contract_id":cid,"workspace_id":meta.workspace_id,"agent":"InitialScan","action":"fallback","status":"healthy","detail":"Model unavailable; continuing with local rule review.","diagnostic":str(error)[:1000]})
+            baseline=local_rule_review(chunks)
+            return {role:[finding.model_copy(update={"finding_id":f"R-{__import__('uuid').uuid4().hex[:8].upper()}"}) for finding in baseline] for role in ("contract_giver","contract_acceptor")}
         def findings_action():
             if not req.model:
-                baseline=local_rule_review(chunks)
-                return {
-                    "contract_giver":[finding.model_copy(update={"finding_id":f"R-{__import__('uuid').uuid4().hex[:8].upper()}"}) for finding in baseline],
-                    "contract_acceptor":[finding.model_copy(update={"finding_id":f"R-{__import__('uuid').uuid4().hex[:8].upper()}"}) for finding in baseline],
-                }
+                return local_findings()
             limit=max(8000,int(meta.document_config.get("review_context_chars",settings.review_context_chars)))
             batches=review_batches(chunks,limit)
             reviews={"contract_giver":[],"contract_acceptor":[]}
@@ -370,16 +395,19 @@ def run_review(cid, chunks, meta, req):
             jurisdiction=req.jurisdiction or classification.get("jurisdiction", "")
             legal_context=format_research_context(ctx.artifacts.get("government_research", {}))
             for batch_number,batch in enumerate(batches,1):
-                result=full_contract_dual_review(batch,req.question,req.model,req.party,contract_type,jurisdiction,legal_context)
+                try:
+                    result=full_contract_dual_review(batch,req.question,req.model,req.party,contract_type,jurisdiction,legal_context)
+                except ModelGenerationError as error:
+                    return local_findings(error)
                 if result is None:
-                    raise RuntimeError(f"Model returned no valid dual-perspective findings for batch {batch_number}/{len(batches)}")
+                    return local_findings(ModelGenerationError("No usable model review was returned."))
                 for role in reviews:
                     reviews[role].extend(result.get(role, []))
             store.audit({"contract_id":cid,"workspace_id":meta.workspace_id,"agent":"InitialScan","action":"batch_summary","status":"healthy","detail":f"Reviewed all {len(chunks)} evidence chunks for both parties in {len(batches)} combined model call(s), capped at {limit} context characters per call."})
             return reviews
         result=master.run_review(ctx, review_action=findings_action, score_action=lambda findings: review_summary(chunks,findings,meta.page_count))
         findings=result["perspective_reviews"]["contract_giver"]["findings"]
-        meta.analysis_progress=85; meta.analysis_stage="Validating graph, evidence, and signature signals"; store.update_meta(meta)
+        meta.analysis_progress=95; meta.analysis_stage="Saving verified reports"; store.update_meta(meta)
         store.save_findings(cid,findings)
         meta.analysis_status="complete"; meta.analysis_progress=100; meta.analysis_stage="Review complete"; store.update_meta(meta)
     except Exception as error:
@@ -395,6 +423,7 @@ def review(cid:str,req:ReviewRequest,background_tasks: BackgroundTasks,x_workspa
         req.model = ""
     elif not req.model and settings.gemini_api_key:
         req.model=default_model(available_models())
+    meta.selected_model=req.model or ""
     meta.analysis_status="queued"; meta.analysis_progress=0; meta.analysis_stage="Queued for review"; store.update_meta(meta)
     background_tasks.add_task(run_review,cid,chunks,meta,req)
     return {"status":"queued","contract_id":cid,"analysis_progress":0,"analysis_stage":"Queued for review"}
@@ -421,9 +450,9 @@ def chat(cid:str,req:ChatRequest,x_workspace_id: str = Header(default="default")
     store.audit({"contract_id":cid,"workspace_id":x_workspace_id,"agent":"GraphRetriever","action":"completed","status":"healthy","chunk_count":len(hits),"detail":f"Connected {graph_fact_count} graph relation(s) to the retrieved chunks."})
     try:
         result=generate("Answer using only this contract evidence, graph facts, and conversation. If the retrieved evidence does not support an answer, say clearly that you cannot determine it from the indexed contract. Cite evidence by returning only valid CHUNK_ID values in cited_chunk_ids. Do not invent page or clause labels or cite unrelated chunks.\nConversation thread:\n"+thread_context+"\nQuestion: "+req.message+f"\nParty represented: {req.party or 'not specified'}\nPerspective: {req.perspective or 'not specified'}\nContract type: {req.contract_type or 'not specified'}\nJurisdiction: {req.jurisdiction or 'not specified'}\nEvidence:\n"+context, schema, req.model)
-    except Exception as error:
-        store.audit({"contract_id":cid,"workspace_id":x_workspace_id,"agent":"AnswerGenerator","action":"failed","status":"degraded","error":str(error)[:1000]})
-        raise
+    except ModelGenerationError as error:
+        store.audit({"contract_id":cid,"workspace_id":x_workspace_id,"agent":"AnswerGenerator","action":"fallback","status":"healthy","detail":"Model unavailable; returning source excerpts.","diagnostic":str(error)[:1000]})
+        result=None
     selected_hits=cited_chunks(result or {},hits)
     answer=(result or {}).get("answer", "").strip()
     grounded_answer=bool(answer and selected_hits)
@@ -433,7 +462,7 @@ def chat(cid:str,req:ChatRequest,x_workspace_id: str = Header(default="default")
     retrieval_trace={"query":retrieval_query,"candidate_chunk_ids":[h.chunk_id for h in hits],"answer_chunk_ids":[h.chunk_id for h in selected_hits],"graph_facts":graph_facts}
     evidence=[{"page":h.page_start,"clause":h.clause,"quote":h.text,"chunk_id":h.chunk_id} for h in selected_hits]
     text=(answer if grounded_answer else fallback_chat_answer(req.message,[(None,h) for h in selected_hits]))
-    payload=store.save_message(cid,"assistant",text,evidence,req.model).model_dump(); payload["retrieval_trace"]=retrieval_trace
+    payload=store.save_message(cid,"assistant",text,evidence,req.model if grounded_answer else None).model_dump(); payload["retrieval_trace"]=retrieval_trace
     return payload
 @app.get("/api/workspace/messages")
 def workspace_messages(x_workspace_id: str = Header(default="default")):
@@ -474,9 +503,8 @@ def workspace_chat(req:WorkspaceChatRequest,x_workspace_id: str = Header(default
         result=generate("You are a senior contract review lawyer. Answer using only the supplied evidence. If the evidence does not support an answer, say clearly that you cannot determine it from the indexed contracts and return no cited chunks. Return cited_chunk_ids containing only CHUNK_ID values that directly support the answer. Do not invent page or clause labels.\nConversation thread:\n"+thread_context+"\nQuestion: "+req.message+f"\nParty represented: {req.party or 'not specified'}\nPerspective: {req.perspective or 'not specified'}\nContract type: {req.contract_type or 'not specified'}\nJurisdiction: {req.jurisdiction or 'not specified'}\nEvidence:\n"+context, {"type":"object","properties":{"answer":{"type":"string"},"cited_chunk_ids":{"type":"array","items":{"type":"string"}}},"required":["answer","cited_chunk_ids"]}, req.model)
     except ModelGenerationError as error:
         for cid,_,_ in selected:
-            store.audit({"contract_id":cid,"workspace_id":x_workspace_id,"agent":"AnswerGenerator","action":"failed","status":"degraded","error":str(error)[:1000]})
-        store.audit({"contract_id":ids[0],"workspace_id":x_workspace_id,"agent":"WorkspaceChat","action":"model_error","error":str(error)[:2000]})
-        raise HTTPException(502,detail=str(error)[:2000]) from error
+            store.audit({"contract_id":cid,"workspace_id":x_workspace_id,"agent":"AnswerGenerator","action":"fallback","status":"healthy","detail":"Model unavailable; returning source excerpts.","diagnostic":str(error)[:1000]})
+        result=None
     answer=result.get("answer","") if result else ""
     selected_hits=cited_chunks(result or {},[hit for _,hit in all_hits])
     grounded_answer=bool(answer.strip() and selected_hits)
@@ -487,7 +515,7 @@ def workspace_chat(req:WorkspaceChatRequest,x_workspace_id: str = Header(default
     text=(answer.strip() if grounded_answer else fallback_chat_answer(req.message,[(None,hit) for hit in selected_hits]))
     for cid,_,_ in selected:
         store.audit({"contract_id":cid,"workspace_id":x_workspace_id,"agent":"AnswerGenerator","action":"completed","status":"healthy","detail":f"{'Answered with' if grounded_answer else 'No grounded answer; returned evidence excerpts from'} {len(selected_hits)} source chunk(s)."})
-    payload=store.save_workspace_message("assistant",text,evidence,workspace_id=x_workspace_id,model=req.model).model_dump(); payload["retrieval_trace"]=retrieval_trace
+    payload=store.save_workspace_message("assistant",text,evidence,workspace_id=x_workspace_id,model=req.model if grounded_answer else None).model_dump(); payload["retrieval_trace"]=retrieval_trace
     return payload
 @app.get("/api/contracts/{cid}/review")
 def get_review(cid:str,x_workspace_id: str = Header(default="default")):

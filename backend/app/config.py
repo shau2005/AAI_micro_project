@@ -1,5 +1,6 @@
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -7,6 +8,7 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     tavily_api_key: str | None = None
     gemini_model: str = "gemini-flash-lite-latest"
+    gemini_timeout_seconds: float = Field(default=60, gt=0, le=300)
     embedding_model: str = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"
     embedding_dimension: int = 384
     embedding_batch_size: int = 32

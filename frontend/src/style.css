@@ -399,3 +399,5 @@ a[aria-disabled="true"] { opacity: .6; cursor: progress; }
   .welcome-format { line-height: 1.8; }
 }
 @media(prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior: auto !important; transition: none !important; } }
+
+.review-status.is-local{background:#fff1cf;color:#765200}
