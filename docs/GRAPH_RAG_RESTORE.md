@@ -1,63 +1,27 @@
-# Graph RAG restoration / implementation guide
+# Graph RAG — restored 20 November 2026
 
-## Saved state
+## Active status
 
-- The active project is a **graph-free review baseline**.
-- The previous working implementation is preserved at local Git tag `graphrag-ready-2026-11-19`, commit `8c18e1f`.
-- It includes graph extraction, evidence validation, graph-assisted retrieval, a graph UI, and graph-specific tests.
-- `docs/restore-graphrag.patch` reintroduces those integrations selectively and preserves reviews saved by the baseline.
-- This preparation is for the requested follow-up on **20 November 2026**. Nothing automatically runs tomorrow. Ask to restore or implement Graph RAG when ready.
+Graph RAG is active in this checkout. The GraphBuilder, GraphValidator, GraphReviewerAgent and GraphRetriever integrations and Relationship graph tab are restored. MetadataAgent, OCR support, independent document chats, document deletion, and plain-language finding explanations remain integrated.
 
-## Current baseline
+The graph-free state is preserved in Git commit `38378f3`. The earlier graph implementation is also saved at tag `graphrag-ready-2026-11-19`. `docs/restore-graphrag.patch` is the forward patch already applied to the graph-free state; do not apply it again to the restored checkout.
 
-Upload -> extract/chunk -> embeddings and lexical/vector indexes -> supervised review -> both party reports.
+## Use it
 
-Chat question -> HybridRetriever -> source passages -> model answer or local excerpts -> citations.
+1. Start the backend and frontend, and refresh the browser.
+2. Open a document and choose **Review report → Re-run contract review** if it was reviewed without a graph. Uploading a new PDF also runs graph extraction.
+3. Open **Relationship graph** to inspect entities, relationships and their source pages. Opening this tab reads saved results and does not initiate a model request.
+4. Ask a question in that document's **Contract chat**. Hybrid passage retrieval supplies chunks; GraphRetriever adds relationship facts connected to those chunks. Extracted metadata remains available as additional cited context.
+5. Check the retrieval trace and Agent activity for the graph facts actually supplied to the answer generator.
 
-There are no active GraphBuilder, GraphValidator, GraphReviewerAgent, or GraphRetriever agents, no graph prompt context, no `/graph` API route, and no Relationship graph tab. Document checks are served through `/api/contracts/{id}/artifacts`.
+## Evidence and limits
 
-Previously saved graph files are retained as historical local data but are not used or returned by the baseline. Normal reports, scores and citations remain readable.
+Graph entities and relationships are checked against contract evidence. Unusable model output falls back to local graph rules. Storage reads newer `.review.json` artifacts before older `.graph.json` files, preserving saved review and metadata results. All contract routes still require the owning workspace header.
 
-## Quick restoration using the prepared module
+The restored retrieval uses direct evidence-linked relationships. It does not perform general multi-hop graph traversal. A graph picture or a correct answer alone does not demonstrate that graph facts were used; inspect the retrieval trace.
 
-From the project root, first save any new work. Inspect the patch before applying it. If its check fails, resolve the affected hunks; do not overwrite whole files with the checkpoint, because that could erase later changes.
+OCR still needs the separate Tesseract engine to read image-only pages on this Mac.
 
-```bash
-git status --short
-git apply --check docs/restore-graphrag.patch
-git apply docs/restore-graphrag.patch
-python -m pytest backend/tests -q
-cd frontend
-npm test
-npm run build
-```
+## Verification
 
-The patch restores graph-specific tests and removes tests that explicitly require graph absence. It restores README/workflow documentation too. Storage compatibility in the patch reads newer `.review.json` artifacts before older `.graph.json` data.
-
-After restoring, refresh the app and re-review the chosen sample to build a current graph. A graph picture alone is not Graph RAG: verify that chat actually receives evidence-backed relationship facts.
-
-## Implementation steps if coding it manually
-
-1. **GraphBuilder:** extract named parties, roles, obligations, amounts and dates from indexed passages. Every entity/link needs source-page evidence. Keep a deterministic local fallback for unavailable Gemini.
-2. **GraphValidator:** discard unknown endpoints, self-links, duplicate links and unsupported quotations.
-3. **Orchestrator:** add GraphBuilder to the independent checks, then validate/review its graph before saving review artifacts.
-4. **GraphRetriever:** connect retrieved chunk IDs to relationship evidence and return the relevant facts. The preserved implementation handles direct evidence-linked relationships; it does not implement general multi-hop traversal.
-5. **Chat:** add graph facts alongside retrieved text in both single-contract and workspace prompts. Keep source citations and workspace checks.
-6. **Interface:** restore the Relationship graph tab, node/edge types, layout controls, source links and graph-agent activity.
-
-## Demonstration checklist
-
-- Baseline: only passage retrieval is active.
-- After implementation: graph contains meaningful entities and relationships with source evidence.
-- A chat question produces graph facts connected to the retrieved source passages.
-- The answer still cites real contract chunks.
-- Invalid graph output or provider failure uses the local fallback.
-- Another workspace cannot access the document or graph.
-
-Do not claim that graph traversal was used merely because an answer is correct; inspect retrieval traces and agent activity. Ordinary passage retrieval may also find all necessary evidence.
-
-## Verification performed before saving
-
-- Graph-free baseline: 34 backend tests and 11 frontend tests passed; TypeScript and Vite production build passed.
-- Restoration: patch applied to an isolated scratch copy; all 37 original backend tests and TypeScript compilation passed.
-- Running baseline API: existing scores preserved, document artifacts readable, graph fields excluded, and `/graph` returns 404.
+Run the backend tests, frontend tests, TypeScript check and production build. Graph restoration tests verify evidence filtering, fallback, workspace isolation, preservation of metadata and saved scores, and graph-fact injection into both document and workspace chat prompts without contacting external models.

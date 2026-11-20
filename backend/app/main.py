@@ -12,7 +12,7 @@ from .ingestion import extract_and_chunk
 from .security import classify_untrusted, valid_evidence
 from .gemini import ModelGenerationError, available_models, default_model, generate
 from .embeddings import embed, embed_query
-from .agents import AGENT_CONTRIBUTIONS, AgentContext, MasterAgent, configure_document, optimize_chunks
+from .agents import AGENT_CONTRIBUTIONS, AgentContext, MasterAgent, graph_context, configure_document, optimize_chunks, build_graph, validate_graph, fix_review_artifacts
 from .internet_search import format_research_context
 from .metadata import metadata_chunk_ids, metadata_context
 app=FastAPI(title="PS-9 Legal Contract Review Agent",version="1.0.0")
@@ -414,19 +414,21 @@ def run_review(cid, chunks, meta, req):
         ctx.artifacts["model"] = req.model
         ctx.artifacts["document_name"] = meta.original_filename
         def update_review_stage(agent):
-            parallel = {"ContractStructurer", "SignatureVerifier", "IntentAgent", "DeadlineAgent", "ObligationAgent"}
+            parallel = {"GraphBuilder", "ContractStructurer", "SignatureVerifier", "IntentAgent", "DeadlineAgent", "ObligationAgent"}
             local_checks = {"CoverageAgent", "DocumentQualityAgent", "SensitiveDataAgent"}
             stages = {
                 "ContractClassifierAgent": (15, "Identifying the document type"),
                 "MetadataAgent": (20, "Extracting parties, dates, amounts and relationships"),
                 "GovernmentResearchAgent": (25, "Looking up official legal sources"),
                 "InitialScan": (35, "Scanning contract risks for both parties"),
+                "GraphValidator": (65, "Validating contract relationships"),
+                "GraphReviewerAgent": (68, "Reviewing relationship evidence"),
                 "TemplateReviewAgent": (75, "Checking the document template"),
                 "FixerAgent": (80, "Checking findings against source evidence"),
                 "CrossChecker": (85, "Cross-checking both party reports"),
                 "ContractScorer": (90, "Calculating review scores"),
             }
-            progress, stage = (45, "Checking signatures, duties and dates") if agent in parallel else (70, "Checking document quality and clause coverage") if agent in local_checks else stages.get(agent, (meta.analysis_progress, meta.analysis_stage))
+            progress, stage = (45, "Checking signatures, duties, dates and relationships") if agent in parallel else (70, "Checking document quality and clause coverage") if agent in local_checks else stages.get(agent, (meta.analysis_progress, meta.analysis_stage))
             meta.analysis_progress = max(meta.analysis_progress, progress)
             meta.analysis_stage = stage
             store.update_meta(meta)
@@ -499,15 +501,19 @@ def chat(cid:str,req:ChatRequest,x_workspace_id: str = Header(default="default")
     hits=HybridRetriever(chunks,vectors,settings.data_dir,embed_query,retrieval_config=retrieval_config).search(retrieval_query,top_k=int(retrieval_config.get("top_k_rerank",settings.top_k_rerank)))
     schema={"type":"object","properties":{"answer":{"type":"string"},"cited_chunk_ids":{"type":"array","items":{"type":"string"}}},"required":["answer","cited_chunk_ids"]}
     context="\n---\n".join(f"[PAGE {h.page_start} | CLAUSE {h.clause or 'unlabeled'} | CHUNK_ID {h.chunk_id}]\n{h.text}" for h in hits)
-    saved_metadata=(store.load_artifacts(cid) or {}).get("metadata")
+    graph_facts=graph_context(store.load_graph(cid), hits)
+    context += "\n---\nGRAPH FACTS:\n" + graph_facts
+    saved_metadata=(store.load_graph(cid) or {}).get("metadata")
     if saved_metadata:
         context+="\n---\nDOCUMENT METADATA (extracted facts; cite the CHUNK_ID shown for a fact you use):\n"+metadata_context(saved_metadata,with_chunk_ids=True)
     metadata_ids=set(metadata_chunk_ids(saved_metadata))
     citable=hits+[c for c in chunks if c.chunk_id in metadata_ids and c.chunk_id not in {h.chunk_id for h in hits}]
     thread_context="\n".join(f"{message.role.upper()}: {message.content[:1200]}" for message in history[-8:])
+    graph_fact_count=0 if graph_facts.startswith("No ") else len(graph_facts.splitlines())
     store.audit({"contract_id":cid,"workspace_id":x_workspace_id,"agent":"RetrieverAgent","action":"completed","status":"healthy","chunk_count":len(hits),"detail":f"Retrieved evidence chunks: {', '.join(h.chunk_id for h in hits) or 'none'}."})
+    store.audit({"contract_id":cid,"workspace_id":x_workspace_id,"agent":"GraphRetriever","action":"completed","status":"healthy","chunk_count":len(hits),"detail":f"Connected {graph_fact_count} graph relation(s) to the retrieved chunks."})
     try:
-        result=generate("Answer using only this contract evidence, the extracted document metadata, and conversation. If the retrieved evidence does not support an answer, say clearly that you cannot determine it from the indexed contract. Cite evidence by returning only valid CHUNK_ID values in cited_chunk_ids. Do not invent page or clause labels or cite unrelated chunks.\nConversation thread:\n"+thread_context+"\nQuestion: "+req.message+f"\nParty represented: {req.party or 'not specified'}\nPerspective: {req.perspective or 'not specified'}\nContract type: {req.contract_type or 'not specified'}\nJurisdiction: {req.jurisdiction or 'not specified'}\nEvidence:\n"+context, schema, req.model)
+        result=generate("Answer using only this contract evidence, graph facts, extracted document metadata, and conversation. If the retrieved evidence does not support an answer, say clearly that you cannot determine it from the indexed contract. Cite evidence by returning only valid CHUNK_ID values in cited_chunk_ids. Do not invent page or clause labels or cite unrelated chunks.\nConversation thread:\n"+thread_context+"\nQuestion: "+req.message+f"\nParty represented: {req.party or 'not specified'}\nPerspective: {req.perspective or 'not specified'}\nContract type: {req.contract_type or 'not specified'}\nJurisdiction: {req.jurisdiction or 'not specified'}\nEvidence:\n"+context, schema, req.model)
     except ModelGenerationError as error:
         store.audit({"contract_id":cid,"workspace_id":x_workspace_id,"agent":"AnswerGenerator","action":"fallback","status":"healthy","detail":"Model unavailable; returning source excerpts.","diagnostic":str(error)[:1000]})
         result=None
@@ -517,7 +523,7 @@ def chat(cid:str,req:ChatRequest,x_workspace_id: str = Header(default="default")
     if not grounded_answer:
         selected_hits=hits[:4]
     store.audit({"contract_id":cid,"workspace_id":x_workspace_id,"agent":"AnswerGenerator","action":"completed","status":"healthy","detail":f"{'Answered with' if grounded_answer else 'No grounded answer; returned evidence excerpts from'} {len(selected_hits)} source chunk(s)."})
-    retrieval_trace={"query":retrieval_query,"candidate_chunk_ids":[h.chunk_id for h in hits],"answer_chunk_ids":[h.chunk_id for h in selected_hits]}
+    retrieval_trace={"query":retrieval_query,"candidate_chunk_ids":[h.chunk_id for h in hits],"answer_chunk_ids":[h.chunk_id for h in selected_hits],"graph_facts":graph_facts}
     evidence=[{"page":h.page_start,"clause":h.clause,"quote":h.text,"chunk_id":h.chunk_id} for h in selected_hits]
     text=(answer if grounded_answer else fallback_chat_answer(req.message,[(None,h) for h in selected_hits]))
     payload=store.save_message(cid,"assistant",text,evidence,req.model if grounded_answer else None).model_dump(); payload["retrieval_trace"]=retrieval_trace
@@ -545,13 +551,21 @@ def workspace_chat(req:WorkspaceChatRequest,x_workspace_id: str = Header(default
         retrieval_query=standalone_retrieval_query(req.message,history,req.model); retrieval_queries[cid]=retrieval_query
         for hit in HybridRetriever(chunks,vectors,settings.data_dir,embed_query,retrieval_config=meta.document_config).search(retrieval_query,top_k=int(meta.document_config.get("top_k_rerank",settings.top_k_rerank))):
             all_hits.append((meta.original_filename,hit))
+    graph_facts_by_contract={}
     for cid,meta,_ in selected:
         contract_hits=[hit for _,hit in all_hits if hit.contract_id==cid]
         store.audit({"contract_id":cid,"workspace_id":x_workspace_id,"agent":"RetrieverAgent","action":"completed","status":"healthy","chunk_count":len(contract_hits),"detail":f"Retrieved {len(contract_hits)} evidence chunk(s) for the workspace question."})
+        graph_facts=graph_context(store.load_graph(cid),contract_hits)
+        graph_facts_by_contract[cid]=graph_facts
+        graph_fact_count=0 if graph_facts.startswith("No ") else len(graph_facts.splitlines())
+        store.audit({"contract_id":cid,"workspace_id":x_workspace_id,"agent":"GraphRetriever","action":"completed","status":"healthy","chunk_count":len(contract_hits),"detail":f"Connected {graph_fact_count} graph relation(s) to the retrieved chunks."})
     context="\n---\n".join(f"DOCUMENT: {name}\n[PAGE {h.page_start} | CLAUSE {h.clause or 'unlabeled'} | CHUNK_ID {h.chunk_id}]\n{h.text}" for name,h in all_hits)
+    context += "\n---\nGRAPH FACTS BY DOCUMENT:\n" + "\n".join(
+        f"{meta.original_filename}: {graph_facts_by_contract[cid]}" for cid,meta,_ in selected
+    )
     citable=[hit for _,hit in all_hits]
     for cid,meta,contract_chunks in selected:
-        saved_metadata=(store.load_artifacts(cid) or {}).get("metadata")
+        saved_metadata=(store.load_graph(cid) or {}).get("metadata")
         if saved_metadata:
             context+=f"\n---\nDOCUMENT METADATA for {meta.original_filename} (extracted facts; cite the CHUNK_ID shown for a fact you use):\n"+metadata_context(saved_metadata,limit=2500,with_chunk_ids=True)
             known={hit.chunk_id for hit in citable}
@@ -569,7 +583,7 @@ def workspace_chat(req:WorkspaceChatRequest,x_workspace_id: str = Header(default
     grounded_answer=bool(answer.strip() and selected_hits)
     if not grounded_answer:
         selected_hits=[hit for _,hit in all_hits[:4]]
-    retrieval_trace={"queries":retrieval_queries,"candidate_chunk_ids":[hit.chunk_id for _,hit in all_hits],"answer_chunk_ids":[hit.chunk_id for hit in selected_hits]}
+    retrieval_trace={"queries":retrieval_queries,"candidate_chunk_ids":[hit.chunk_id for _,hit in all_hits],"answer_chunk_ids":[hit.chunk_id for hit in selected_hits],"graph_facts":"\n".join(f"{meta.original_filename}:\n{graph_facts_by_contract[cid]}" for cid,meta,_ in selected)}
     evidence=[{"page":hit.page_start,"clause":hit.clause,"quote":hit.text,"chunk_id":hit.chunk_id} for hit in selected_hits]
     text=(answer.strip() if grounded_answer else fallback_chat_answer(req.message,[(None,hit) for hit in selected_hits]))
     for cid,_,_ in selected:
@@ -583,7 +597,7 @@ def get_review(cid:str,x_workspace_id: str = Header(default="default")):
     stored=store.findings(cid)
     meta=scoped_meta(cid,x_workspace_id)
     summary=review_summary(chunks,[f for f,_ in stored],meta.page_count) if meta.analysis_status=="complete" else {"score":None,"rationale":"Run analysis to calculate the contract health score.","strengths":[],"gaps":[],"finding_count":0,"finding_penalty":0,"gap_penalty":0}
-    saved=store.load_artifacts(cid) or {}
+    saved=store.load_graph(cid) or {}
     perspective_reviews=saved.get("perspective_reviews",{})
     decisions={finding.finding_id:decision for finding,decision in stored}
     for role,data in perspective_reviews.items():
@@ -593,6 +607,13 @@ def get_review(cid:str,x_workspace_id: str = Header(default="default")):
     response_summary=giver.get("summary") or summary
     return {"contract_id":cid,"analysis_status":meta.analysis_status,"analysis_progress":meta.analysis_progress,"analysis_stage":meta.analysis_stage,"summary":response_summary,"findings":response_findings,"perspective_reviews":perspective_reviews,"agents":saved}
 
+@app.get("/api/contracts/{cid}/graph")
+def contract_graph(cid:str,x_workspace_id: str = Header(default="default")):
+    try: meta=scoped_meta(cid,x_workspace_id)
+    except KeyError: raise HTTPException(404,"Contract not found")
+    saved=store.load_graph(cid) or {"graph":{"nodes":[],"edges":[]},"structure":{},"signature":{}}
+    # Viewing saved graph data is read-only. Generate it through an explicit review.
+    return saved
 @app.post("/api/findings/{fid}/decision")
 def decision(fid:str,req:DecisionRequest):
     if req.decision not in {"approved","rejected","more_evidence","edited"}: raise HTTPException(400,"Invalid decision")
@@ -602,7 +623,7 @@ def decision(fid:str,req:DecisionRequest):
 def contract_metadata(cid:str,x_workspace_id: str = Header(default="default")):
     try: scoped_meta(cid,x_workspace_id)
     except KeyError: raise HTTPException(404,"Contract not found")
-    metadata=(store.load_artifacts(cid) or {}).get("metadata")
+    metadata=(store.load_graph(cid) or {}).get("metadata")
     if metadata is None: raise HTTPException(404,"Metadata is available after the contract review has run")
     return metadata
 
@@ -610,4 +631,4 @@ def contract_metadata(cid:str,x_workspace_id: str = Header(default="default")):
 def contract_artifacts(cid:str,x_workspace_id: str = Header(default="default")):
     try: scoped_meta(cid,x_workspace_id)
     except KeyError: raise HTTPException(404,"Contract not found")
-    return store.load_artifacts(cid) or {}
+    return store.load_graph(cid) or {}

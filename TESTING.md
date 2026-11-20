@@ -36,7 +36,7 @@ npm run build
 2. Upload each sample PDF from [`testing contracts/`](testing%20contracts/).
 3. Confirm indexing reaches a completed state and the contract appears in the
    workspace.
-4. Check both contract perspective reports, evidence citations, document checks,
+4. Check both contract perspective reports, evidence citations, graph details,
    agent activity, and grounded chat responses.
 5. Upload a template-compatible property deed and verify the template review
    uses the bundled checklists in

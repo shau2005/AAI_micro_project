@@ -26,7 +26,7 @@ def documents(monkeypatch, tmp_path):
         storage.save_contract(meta, content)
         storage.save_chunks(cid, [Chunk(chunk_id=f'{cid}_C0001', contract_id=cid, page_start=1, page_end=1, text='Synthetic contract.')])
         storage.save_message(cid, 'user', f'Question for {workspace}')
-        storage.save_artifacts(cid, {'perspective_reviews': {'contract_giver': {'findings': [], 'summary': {'score': 70}}}})
+        storage.save_graph(cid, {'perspective_reviews': {'contract_giver': {'findings': [], 'summary': {'score': 70}}}})
         (tmp_path / 'indexes' / f'{cid}.graph.json').write_text('{}')
         (tmp_path / 'embeddings' / f'{cid}.npy').write_bytes(b'placeholder')
         (tmp_path / 'reports' / f'{cid}.json').write_text('{}')
@@ -89,7 +89,7 @@ def test_same_pdf_upload_after_delete_is_indexed_afresh(monkeypatch, documents):
     def index(cid, data, workspace, model, perspective):
         indexed.append(cid)
         assert storage.messages(cid) == []
-        assert storage.load_artifacts(cid) is None
+        assert storage.load_graph(cid) is None
         assert not (storage.root / 'embeddings' / f'{cid}.npy').exists()
     monkeypatch.setattr(main, 'index_contract', index)
     client = TestClient(main.app)
