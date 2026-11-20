@@ -27,6 +27,7 @@ def _chunk(cid, number, records):
         heading=heading,
         text=text,
         token_estimate=max(1, len(text) // 4),
+        extraction="ocr" if any(record.get("ocr") for record in records) else "text",
     )
 
 
@@ -46,13 +47,41 @@ def _split_paragraph(text, chunk_size_chars):
     return result
 
 
-def extract_and_chunk(pdf, cid, chunk_size_chars=None, chunk_overlap_chars=None):
+def read_pages(doc, ocr_report=None):
+    """Return (page_number, text, used_ocr) for every page, using OCR only for scanned pages."""
+    from .ocr import OCRUnavailable, needs_ocr, ocr_page
+
+    report = ocr_report if ocr_report is not None else {}
+    report.update({"ocr_pages": [], "ocr_confidence": {}, "ocr_unavailable_pages": [], "ocr_error": None})
+    pages = []
+    for index, page in enumerate(doc):
+        number = index + 1
+        text = page.get_text("text").strip()
+        used_ocr = False
+        if needs_ocr(text) and settings.enable_ocr:
+            try:
+                result = ocr_page(page)
+                if len(result["text"]) > len(text):
+                    text, used_ocr = result["text"], True
+                    report["ocr_pages"].append(number)
+                    report["ocr_confidence"][str(number)] = result["confidence"]
+                    report["ocr_language"] = result["language"]
+            except OCRUnavailable as error:
+                report["ocr_unavailable_pages"].append(number)
+                report["ocr_error"] = str(error)
+        pages.append((number, text, used_ocr))
+    report["page_count"] = len(pages)
+    return pages
+
+
+def extract_and_chunk(pdf, cid, chunk_size_chars=None, chunk_overlap_chars=None, ocr_report=None, pages=None):
+    """Chunk a PDF. Pass `pages` from `read_pages` to re-chunk without reading (or OCR-ing) the PDF again."""
     chunk_size_chars = chunk_size_chars or settings.chunk_size_chars
     chunk_overlap_chars = chunk_overlap_chars or settings.chunk_overlap_chars
     if chunk_overlap_chars >= chunk_size_chars:
         raise ValueError("CHUNK_OVERLAP_CHARS must be smaller than CHUNK_SIZE_CHARS")
-    doc = fitz.open(stream=pdf, filetype="pdf")
-    pages = [(index + 1, page.get_text("text").strip()) for index, page in enumerate(doc)]
+    if pages is None:
+        pages = read_pages(fitz.open(stream=pdf, filetype="pdf"), ocr_report)
     chunks = []
     current = []
     active_clause = active_heading = ""
@@ -63,7 +92,7 @@ def extract_and_chunk(pdf, cid, chunk_size_chars=None, chunk_overlap_chars=None)
             chunks.append(_chunk(cid, len(chunks) + 1, current))
             current = []
 
-    for page, text in pages:
+    for page, text, used_ocr in pages:
         if not text:
             continue
         for paragraph in re.split(r"\n\s*\n", text):
@@ -80,6 +109,7 @@ def extract_and_chunk(pdf, cid, chunk_size_chars=None, chunk_overlap_chars=None)
                     "clause": active_clause,
                     "heading": active_heading,
                     "text": piece,
+                    "ocr": used_ocr,
                 }
                 if current and sum(len(item["text"]) for item in current) + len(piece) + 2 > chunk_size_chars:
                     previous_text = "\n\n".join(item["text"] for item in current)
@@ -93,7 +123,8 @@ def extract_and_chunk(pdf, cid, chunk_size_chars=None, chunk_overlap_chars=None)
                             "clause": previous_record["clause"],
                             "heading": previous_record["heading"],
                             "text": overlap,
+                            "ocr": previous_record.get("ocr", False),
                         })
                 current.append(record)
     flush()
-    return len(doc), chunks
+    return len(pages), chunks

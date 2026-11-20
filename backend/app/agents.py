@@ -33,6 +33,7 @@ AGENT_CONTRIBUTIONS = {
     "Ingestion": "Extracts PDF text, applies finalized chunk settings, and builds local embeddings/indexes.",
     "DocumentConfigAgent": "Profiles this contract and selects bounded per-document indexing, retrieval, and review settings.",
     "ContractClassifierAgent": "Identifies the likely document type and jurisdiction from contract text, with evidence and confidence.",
+    "MetadataAgent": "Extracts grounded parties, roles, dates, amounts, durations, property details and their relationships, and checks required details.",
     "GovernmentResearchAgent": "Searches official Indian government legal sources for current rules related to the classified document type.",
     "ChunkOptimizer": "Measures chunk sizes and recommends chunk size/overlap for retrieval quality.",
     "InitialScan": "Uses the selected model to scan the complete contract and identify risk clauses.",
@@ -158,6 +159,8 @@ class MasterAgent:
         stored_pipeline=store.load_artifacts(ctx.contract_id) or {}
         ctx.artifacts["chunk_optimization"] = stored_pipeline.get("chunk_optimization") or optimize_chunks(ctx.chunks)
         ctx.artifacts["classification"] = self.execute("ContractClassifierAgent", ctx, lambda: classify_contract(ctx.chunks, ctx.artifacts.get("model"), ctx.artifacts.get("document_name")))
+        from .metadata import extract_metadata
+        ctx.artifacts["metadata"] = self.execute("MetadataAgent", ctx, lambda: extract_metadata(ctx.chunks, ctx.artifacts.get("model"), ctx.artifacts["classification"]))
         from .internet_search import research_contract_rules
         ctx.artifacts["government_research"] = self.execute("GovernmentResearchAgent", ctx, lambda: research_contract_rules(ctx.artifacts["classification"]))
         scan = self.execute("InitialScan", ctx, review_action)
@@ -217,6 +220,7 @@ class MasterAgent:
                                            "obligations": ctx.artifacts["obligations"], "coverage": ctx.artifacts["coverage"],
                                            "document_quality": ctx.artifacts["document_quality"], "sensitive_data": ctx.artifacts["sensitive_data"],
                                            "classification": ctx.artifacts["classification"],
+                                           "metadata": ctx.artifacts["metadata"],
                                            "government_research": ctx.artifacts["government_research"]})
         saved = store.load_artifacts(ctx.contract_id) or {}
         persisted_reviews={role:{"findings":[finding.model_dump() for finding in item["findings"]],"summary":item["summary"]}
@@ -232,6 +236,12 @@ def describe_output(name: str, result: Any) -> str:
         return f"Configured {result['recommended_chunk_size']}/{result['recommended_overlap']} character chunks, {result['embedding_batch_size']} embedding batch, top-{result['top_k_rerank']} retrieval, and {result['review_context_chars']} review context."
     if name == "ContractClassifierAgent":
         return f"Classified as {result.get('document_type', 'unknown')} ({result.get('confidence', 'low')} confidence); jurisdiction: {result.get('jurisdiction', 'unknown')}."
+    if name == "MetadataAgent":
+        counts = result.get("counts", {})
+        required = result.get("required", {})
+        return (f"Extracted {counts.get('parties', 0)} part(ies), {counts.get('dates', 0)} date(s), {counts.get('amounts', 0)} amount(s), "
+                f"{counts.get('relationships', 0)} relationship(s) via {result.get('method', 'rules')}; "
+                f"{required.get('present_count', 0)}/{required.get('required_count', 0)} required details found.")
     if name == "GovernmentResearchAgent":
         return f"Official-source lookup: {result.get('status')}; found {len(result.get('sources', []))} source(s)."
     if name == "ChunkOptimizer":
@@ -481,7 +491,9 @@ def document_quality(chunks: list[Chunk]) -> dict[str, Any]:
     if sum(lengths)/len(lengths) < 120: warnings.append("Very short extracted chunks; OCR or layout extraction may be incomplete.")
     if sum(len(re.findall(r"[^\x09\x0A\x0D\x20-\x7E]",chunk.text)) for chunk in chunks) > sum(lengths)*.08: warnings.append("High non-ASCII noise suggests OCR or encoding issues.")
     if len({chunk.text.strip().lower() for chunk in chunks}) < len(chunks)*.8: warnings.append("Repeated chunk text detected.")
-    return {"status":"warnings" if warnings else "good","warnings":warnings,"average_chars":round(sum(lengths)/len(lengths)),"chunk_count":len(chunks)}
+    ocr_pages=sorted({page for chunk in chunks if chunk.extraction=="ocr" for page in range(chunk.page_start,chunk.page_end+1)})
+    if ocr_pages: warnings.append(f"{len(ocr_pages)} page(s) were read with OCR ({', '.join(map(str,ocr_pages))}); check names, dates and amounts against the original scan.")
+    return {"status":"warnings" if warnings else "good","warnings":warnings,"average_chars":round(sum(lengths)/len(lengths)),"chunk_count":len(chunks),"ocr_pages":ocr_pages}
 
 
 def detect_sensitive_data(chunks: list[Chunk]) -> dict[str, Any]:

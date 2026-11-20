@@ -14,6 +14,7 @@ from .gemini import ModelGenerationError, available_models, default_model, gener
 from .embeddings import embed, embed_query
 from .agents import AGENT_CONTRIBUTIONS, AgentContext, MasterAgent, configure_document, optimize_chunks
 from .internet_search import format_research_context
+from .metadata import metadata_chunk_ids, metadata_context
 app=FastAPI(title="PS-9 Legal Contract Review Agent",version="1.0.0")
 app.add_middleware(CORSMiddleware,allow_origins=[origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()],allow_methods=["*"],allow_headers=["*"])
 def scoped_meta(cid,workspace_id):
@@ -38,7 +39,12 @@ def find_source_evidence(quote, chunks):
     return None, None
 @app.get("/api/health")
 def health():
-    return {"status":"ok","orchestrator":"healthy","gemini_configured":bool(settings.gemini_api_key),"gemini_model":settings.gemini_model,"embedding_model":settings.embedding_model,"embedding_dimension":settings.embedding_dimension,"max_retries":settings.max_retries}
+    return {"status":"ok","orchestrator":"healthy","gemini_configured":bool(settings.gemini_api_key),"gemini_model":settings.gemini_model,"embedding_model":settings.embedding_model,"embedding_dimension":settings.embedding_dimension,"max_retries":settings.max_retries,"ocr":ocr_status()}
+
+@app.get("/api/ocr/status")
+def ocr_status():
+    from .ocr import tesseract_status
+    return tesseract_status()
 
 @app.get("/api/mcp/status")
 def mcp_status():
@@ -126,7 +132,7 @@ def full_contract_review(chunks, question, model, party="", perspective="", cont
     return findings
 
 
-def full_contract_dual_review(chunks, question, model, party="", contract_type="", jurisdiction="", legal_context=""):
+def full_contract_dual_review(chunks, question, model, party="", contract_type="", jurisdiction="", legal_context="", document_metadata=""):
     """Return giver and acceptor findings together so both sides share one model call per evidence batch."""
     if not model: return None
     finding_schema={"type":"array","items":{"type":"object","properties":{
@@ -146,7 +152,7 @@ def full_contract_dual_review(chunks, question, model, party="", contract_type="
             "Return at most 10 findings per side. Every finding must quote exact supplied text and use its supplied page, clause, and chunk. Do not invent facts, quotes, page numbers, legal duties, or missing clauses. "
             "Government search results are legal research leads, separate from contract evidence. Only use a rule when the source summary supports it, identify the source in reasoning, and do not state an amendment is in force unless commencement is verified. If no useful source was retrieved, assess contract wording without claiming current law was checked. "
             "Return JSON matching the schema exactly.\n\n"
-            f"Review request: {question}\nParty represented: {party or 'not specified'}\nContract type: {contract_type or 'not specified'}\nJurisdiction: {jurisdiction or 'not specified'}\n\nOFFICIAL-SOURCE RESEARCH:\n{legal_context}\n\nCONTRACT_TEXT:\n{contract_text}")
+            f"Review request: {question}\nParty represented: {party or 'not specified'}\nContract type: {contract_type or 'not specified'}\nJurisdiction: {jurisdiction or 'not specified'}\n\nDOCUMENT METADATA (extracted parties, roles, dates and amounts with source pages; use it to identify the parties, but quote the contract text for findings):\n{document_metadata or 'not available'}\n\nOFFICIAL-SOURCE RESEARCH:\n{legal_context}\n\nCONTRACT_TEXT:\n{contract_text}")
     prompt=REVIEW_EXPLANATION_INSTRUCTIONS+"\n"+prompt
     result=generate(prompt,schema,model,temperature=0)
     if result is None: return None
@@ -260,9 +266,19 @@ def index_contract(cid, content, workspace_id, model, perspective="contract_give
     try:
         meta.indexing_error=None
         meta.indexing_stage="Extracting text"; meta.indexing_progress=15; store.update_meta(meta)
-        pages,chunks=extract_and_chunk(content,cid)
+        import fitz
+        from .ingestion import read_pages
+        ocr_report={}
+        meta.indexing_stage="Reading pages (OCR for scanned pages)"; store.update_meta(meta)
+        page_texts=read_pages(fitz.open(stream=content,filetype="pdf"),ocr_report)
+        pages,chunks=extract_and_chunk(content,cid,pages=page_texts)
+        if ocr_report.get("ocr_pages"):
+            store.audit({"contract_id":cid,"workspace_id":workspace_id,"agent":"Ingestion","action":"ocr","status":"healthy",
+                         "detail":f"Read {len(ocr_report['ocr_pages'])} scanned page(s) with Tesseract OCR ({ocr_report.get('ocr_language','eng')}); mean word confidence by page: {ocr_report['ocr_confidence']}."})
         if not chunks:
-            raise ValueError("No extractable text, OCR needed")
+            if ocr_report.get("ocr_unavailable_pages"):
+                raise ValueError("This PDF has no digital text (it looks scanned), and OCR is unavailable: "+str(ocr_report.get("ocr_error")))
+            raise ValueError("No readable text was found, even with OCR. Check that the scan is clear and upright.")
         meta.indexing_stage="Finalizing chunk size and overlap"; meta.indexing_progress=25; store.update_meta(meta)
         optimizer=MasterAgent(max_retries=settings.max_retries)
         chunk_context=AgentContext(contract_id=cid,workspace_id=workspace_id,chunks=chunks)
@@ -272,7 +288,7 @@ def index_contract(cid, content, workspace_id, model, perspective="contract_give
         chunk_settings["recommended_overlap"]=chunk_plan["recommended_overlap"]
         target_size=chunk_plan["recommended_chunk_size"]; target_overlap=chunk_plan["recommended_overlap"]
         if target_size != settings.chunk_size_chars or target_overlap != settings.chunk_overlap_chars:
-            pages, optimized=extract_and_chunk(content,cid,target_size,target_overlap)
+            pages, optimized=extract_and_chunk(content,cid,target_size,target_overlap,pages=page_texts)
             if optimized:
                 chunks=optimized; chunk_plan["applied"] = True
         else:
@@ -280,6 +296,7 @@ def index_contract(cid, content, workspace_id, model, perspective="contract_give
         chunk_settings["document_id"]=cid; chunk_settings["document_filename"]=meta.original_filename
         chunk_settings["reason"] = chunk_settings.get("reason", "") + " Applied before embeddings and lexical/vector indexing."
         chunk_settings["chunk_optimization"]=chunk_plan
+        chunk_settings["ocr"]={key:value for key,value in ocr_report.items() if key!="page_count"}
         meta.document_config=chunk_settings; store.update_meta(meta)
         meta.page_count=pages; meta.chunk_count=len(chunks); meta.indexing_stage="Building lexical and vector index"; meta.indexing_progress=30; store.update_meta(meta)
         def embedding_progress(completed, total):
@@ -401,6 +418,7 @@ def run_review(cid, chunks, meta, req):
             local_checks = {"CoverageAgent", "DocumentQualityAgent", "SensitiveDataAgent"}
             stages = {
                 "ContractClassifierAgent": (15, "Identifying the document type"),
+                "MetadataAgent": (20, "Extracting parties, dates, amounts and relationships"),
                 "GovernmentResearchAgent": (25, "Looking up official legal sources"),
                 "InitialScan": (35, "Scanning contract risks for both parties"),
                 "TemplateReviewAgent": (75, "Checking the document template"),
@@ -434,7 +452,7 @@ def run_review(cid, chunks, meta, req):
             legal_context=format_research_context(ctx.artifacts.get("government_research", {}))
             for batch_number,batch in enumerate(batches,1):
                 try:
-                    result=full_contract_dual_review(batch,req.question,req.model,req.party,contract_type,jurisdiction,legal_context)
+                    result=full_contract_dual_review(batch,req.question,req.model,req.party,contract_type,jurisdiction,legal_context,metadata_context(ctx.artifacts.get("metadata")))
                 except ModelGenerationError as error:
                     return local_findings(error)
                 if result is None:
@@ -481,14 +499,19 @@ def chat(cid:str,req:ChatRequest,x_workspace_id: str = Header(default="default")
     hits=HybridRetriever(chunks,vectors,settings.data_dir,embed_query,retrieval_config=retrieval_config).search(retrieval_query,top_k=int(retrieval_config.get("top_k_rerank",settings.top_k_rerank)))
     schema={"type":"object","properties":{"answer":{"type":"string"},"cited_chunk_ids":{"type":"array","items":{"type":"string"}}},"required":["answer","cited_chunk_ids"]}
     context="\n---\n".join(f"[PAGE {h.page_start} | CLAUSE {h.clause or 'unlabeled'} | CHUNK_ID {h.chunk_id}]\n{h.text}" for h in hits)
+    saved_metadata=(store.load_artifacts(cid) or {}).get("metadata")
+    if saved_metadata:
+        context+="\n---\nDOCUMENT METADATA (extracted facts; cite the CHUNK_ID shown for a fact you use):\n"+metadata_context(saved_metadata,with_chunk_ids=True)
+    metadata_ids=set(metadata_chunk_ids(saved_metadata))
+    citable=hits+[c for c in chunks if c.chunk_id in metadata_ids and c.chunk_id not in {h.chunk_id for h in hits}]
     thread_context="\n".join(f"{message.role.upper()}: {message.content[:1200]}" for message in history[-8:])
     store.audit({"contract_id":cid,"workspace_id":x_workspace_id,"agent":"RetrieverAgent","action":"completed","status":"healthy","chunk_count":len(hits),"detail":f"Retrieved evidence chunks: {', '.join(h.chunk_id for h in hits) or 'none'}."})
     try:
-        result=generate("Answer using only this contract evidence and conversation. If the retrieved evidence does not support an answer, say clearly that you cannot determine it from the indexed contract. Cite evidence by returning only valid CHUNK_ID values in cited_chunk_ids. Do not invent page or clause labels or cite unrelated chunks.\nConversation thread:\n"+thread_context+"\nQuestion: "+req.message+f"\nParty represented: {req.party or 'not specified'}\nPerspective: {req.perspective or 'not specified'}\nContract type: {req.contract_type or 'not specified'}\nJurisdiction: {req.jurisdiction or 'not specified'}\nEvidence:\n"+context, schema, req.model)
+        result=generate("Answer using only this contract evidence, the extracted document metadata, and conversation. If the retrieved evidence does not support an answer, say clearly that you cannot determine it from the indexed contract. Cite evidence by returning only valid CHUNK_ID values in cited_chunk_ids. Do not invent page or clause labels or cite unrelated chunks.\nConversation thread:\n"+thread_context+"\nQuestion: "+req.message+f"\nParty represented: {req.party or 'not specified'}\nPerspective: {req.perspective or 'not specified'}\nContract type: {req.contract_type or 'not specified'}\nJurisdiction: {req.jurisdiction or 'not specified'}\nEvidence:\n"+context, schema, req.model)
     except ModelGenerationError as error:
         store.audit({"contract_id":cid,"workspace_id":x_workspace_id,"agent":"AnswerGenerator","action":"fallback","status":"healthy","detail":"Model unavailable; returning source excerpts.","diagnostic":str(error)[:1000]})
         result=None
-    selected_hits=cited_chunks(result or {},hits)
+    selected_hits=cited_chunks(result or {},citable)
     answer=(result or {}).get("answer", "").strip()
     grounded_answer=bool(answer and selected_hits)
     if not grounded_answer:
@@ -526,6 +549,14 @@ def workspace_chat(req:WorkspaceChatRequest,x_workspace_id: str = Header(default
         contract_hits=[hit for _,hit in all_hits if hit.contract_id==cid]
         store.audit({"contract_id":cid,"workspace_id":x_workspace_id,"agent":"RetrieverAgent","action":"completed","status":"healthy","chunk_count":len(contract_hits),"detail":f"Retrieved {len(contract_hits)} evidence chunk(s) for the workspace question."})
     context="\n---\n".join(f"DOCUMENT: {name}\n[PAGE {h.page_start} | CLAUSE {h.clause or 'unlabeled'} | CHUNK_ID {h.chunk_id}]\n{h.text}" for name,h in all_hits)
+    citable=[hit for _,hit in all_hits]
+    for cid,meta,contract_chunks in selected:
+        saved_metadata=(store.load_artifacts(cid) or {}).get("metadata")
+        if saved_metadata:
+            context+=f"\n---\nDOCUMENT METADATA for {meta.original_filename} (extracted facts; cite the CHUNK_ID shown for a fact you use):\n"+metadata_context(saved_metadata,limit=2500,with_chunk_ids=True)
+            known={hit.chunk_id for hit in citable}
+            metadata_ids=set(metadata_chunk_ids(saved_metadata))
+            citable+=[c for c in contract_chunks if c.chunk_id in metadata_ids and c.chunk_id not in known]
     thread_context="\n".join(f"{message.role.upper()}: {message.content[:1200]}" for message in history[-8:])
     try:
         result=generate("You are a senior contract review lawyer. Answer using only the supplied evidence. If the evidence does not support an answer, say clearly that you cannot determine it from the indexed contracts and return no cited chunks. Return cited_chunk_ids containing only CHUNK_ID values that directly support the answer. Do not invent page or clause labels.\nConversation thread:\n"+thread_context+"\nQuestion: "+req.message+f"\nParty represented: {req.party or 'not specified'}\nPerspective: {req.perspective or 'not specified'}\nContract type: {req.contract_type or 'not specified'}\nJurisdiction: {req.jurisdiction or 'not specified'}\nEvidence:\n"+context, {"type":"object","properties":{"answer":{"type":"string"},"cited_chunk_ids":{"type":"array","items":{"type":"string"}}},"required":["answer","cited_chunk_ids"]}, req.model)
@@ -534,7 +565,7 @@ def workspace_chat(req:WorkspaceChatRequest,x_workspace_id: str = Header(default
             store.audit({"contract_id":cid,"workspace_id":x_workspace_id,"agent":"AnswerGenerator","action":"fallback","status":"healthy","detail":"Model unavailable; returning source excerpts.","diagnostic":str(error)[:1000]})
         result=None
     answer=result.get("answer","") if result else ""
-    selected_hits=cited_chunks(result or {},[hit for _,hit in all_hits])
+    selected_hits=cited_chunks(result or {},citable)
     grounded_answer=bool(answer.strip() and selected_hits)
     if not grounded_answer:
         selected_hits=[hit for _,hit in all_hits[:4]]
@@ -566,6 +597,14 @@ def get_review(cid:str,x_workspace_id: str = Header(default="default")):
 def decision(fid:str,req:DecisionRequest):
     if req.decision not in {"approved","rejected","more_evidence","edited"}: raise HTTPException(400,"Invalid decision")
     store.decide(fid,req.decision); store.audit({"agent":"HumanReview","action":"decision","finding_id":fid,"decision":req.decision,"note":req.note}); return {"status":"recorded"}
+
+@app.get("/api/contracts/{cid}/metadata")
+def contract_metadata(cid:str,x_workspace_id: str = Header(default="default")):
+    try: scoped_meta(cid,x_workspace_id)
+    except KeyError: raise HTTPException(404,"Contract not found")
+    metadata=(store.load_artifacts(cid) or {}).get("metadata")
+    if metadata is None: raise HTTPException(404,"Metadata is available after the contract review has run")
+    return metadata
 
 @app.get("/api/contracts/{cid}/artifacts")
 def contract_artifacts(cid:str,x_workspace_id: str = Header(default="default")):

@@ -6,7 +6,7 @@ Based on [moneet9/LEGAL-CONTRACT-REVIEW-AGENT-](https://github.com/moneet9/LEGAL
 
 ## Current review baseline
 
-**Graph RAG is not included in this baseline.** Graph building, graph validation, graph retrieval, and the relationship-graph UI have been removed. Chat retrieves contract passages through BM25 and vector search and returns citations. It does not use entity relationships or graph traversal.
+**Graph RAG is not included in this baseline.** Graph building, graph validation, graph retrieval, and the relationship-graph UI have been removed. Chat retrieves contract passages through BM25 and vector search and returns citations. It does not build or traverse a retrieval graph. Extracted metadata can still supplement passage evidence.
 
 The earlier working implementation is preserved at Git tag `graphrag-ready-2026-11-19`. See [the restoration guide](docs/GRAPH_RAG_RESTORE.md) for a selective, verified restoration patch and implementation steps.
 
@@ -36,22 +36,34 @@ Keep API keys in the ignored `.env` file. Gemini requests have a configurable ti
 
 On Windows, use the existing `start.cmd` / `start.ps1` setup scripts and `stop.cmd` / `stop.ps1` stop scripts.
 
+### OCR for scanned PDFs
+
+Scanned (image-only) pages are read with the **Tesseract** OCR engine through `pytesseract`. Install the engine once:
+
+- Windows: `winget install --id UB-Mannheim.TesseractOCR`
+- Ubuntu/Debian: `sudo apt install tesseract-ocr`
+
+The app finds Tesseract on `PATH` or in the standard Windows install folder; otherwise set `TESSERACT_CMD` in `.env`. Only pages with almost no digital text (`OCR_MIN_CHARS`) are sent to OCR, rendered at `OCR_DPI`. Add Hindi or Marathi with `OCR_LANGUAGES=eng+hin+mar` after installing those Tesseract language packs. `GET /api/ocr/status` reports whether OCR is ready. If a scanned PDF is uploaded without Tesseract, indexing fails with a message explaining how to enable OCR.
+
 ## Review workflow
 
-1. Extract PDF text, optimise chunks, and build lexical/vector indexes.
-2. Classify the document and obtain optional official-source research.
-3. Scan the indexed evidence for both party perspectives.
-4. Run structure, signature, intent, deadline, and obligation checks in parallel.
-5. Check coverage, document quality, sensitive-data signals, and applicable deed templates.
-6. Remove unsupported/duplicate findings, cross-check evidence, and calculate explainable scores.
-7. Save reports, citations, checks, and activity for the interface.
+1. Extract PDF text (Tesseract OCR for scanned pages), optimise chunks, and build lexical/vector indexes.
+2. Classify the document.
+3. **MetadataAgent** extracts parties and roles, dates, amounts, durations, property details and the explicit relationships between them (for example *Vendee pays Sale consideration to Vendor*), and checks the details required for that document type. Local rules always run; a selected model adds values, but only values whose quote is found in the contract are kept.
+4. Obtain optional official-source research.
+5. Scan the indexed evidence for both party perspectives, using the metadata to identify the parties.
+6. Run structure, signature, intent, deadline, and obligation checks in parallel.
+7. Check coverage, document quality (including which pages came from OCR), sensitive-data signals, and applicable deed templates.
+8. Remove unsupported/duplicate findings, cross-check evidence, and calculate explainable scores.
+9. Save reports, metadata, citations, checks, and activity for the interface.
 
-`MasterAgent` coordinates stage order, parallel work, bounded retries, progress, and audit logging. Chat uses a separate passage-retrieval and answer-generation flow.
+`MasterAgent` coordinates stage order, parallel work, bounded retries, progress, and audit logging. Chat uses a separate passage-retrieval and answer-generation flow; the saved metadata is added to chat prompts with its source chunk IDs, so answers about parties, dates and amounts stay cited.
 
 ## Interface
 
 - **Review report:** party perspectives, scores, findings, and source quotations.
-- **Contract chat:** questions answered from selected contract passages.
+- **Contract chat:** questions answered from selected contract passages and extracted metadata.
+- **Key facts:** MetadataAgent output — parties, amounts, dates, durations, property, relationships and required-detail checks, each with its page.
 - **Evidence & checks:** citations, document quality, deadlines, obligations, signatures, and templates.
 - **Legal research:** classification and linked official-source search results.
 - **Agent activity:** stage results, retries, and fallback information.
@@ -67,13 +79,13 @@ npm test
 npm run build
 ```
 
-API diagnostics include `/api/health`, `/api/agents/telemetry`, `/api/contracts/{id}/review`, and `/api/contracts/{id}/artifacts`. Contract-specific requests require the owning `X-Workspace-ID` header.
+API diagnostics include `/api/health`, `/api/ocr/status`, `/api/agents/telemetry`, `/api/contracts/{id}/review`, `/api/contracts/{id}/metadata`, and `/api/contracts/{id}/artifacts`. Contract-specific requests require the owning `X-Workspace-ID` header.
 
 ## Current limitations
 
 1. No dedicated systematic contradiction detection across clauses.
 2. No dedicated verification of referenced clauses and attachments.
-3. No OCR pipeline for image-only scanned PDFs.
+3. OCR accuracy depends on scan quality; OCR pages are flagged so names, dates and amounts can be checked against the original.
 4. No Graph RAG to retrieve information through entity relationships.
 
 Historical architecture notes in `PROJECT_DETAILS.md` describe the earlier version; this README describes the active baseline.
