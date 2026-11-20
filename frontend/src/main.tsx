@@ -7,6 +7,7 @@ import {PdfLink, PdfProvider} from './PdfLinks';
 import {selectPerspective} from './review-state';
 import {DocumentChatSessions} from './document-chat';
 import {FindingExplanation} from './FindingExplanation';
+import {GraphExplorer} from './GraphExplorer';
 
 const API = `${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/api`;
 const REVIEW_QUESTION = 'Review financial, liability, privacy, intellectual property, compliance, and termination risks.';
@@ -421,38 +422,8 @@ function MCPToolPanel({graph,telemetry,serverStatus,running}: {graph?: ContractG
   </div>;
 }
 
-function forceGraphLayout(nodes: GraphNode[], edges: GraphEdge[]) {
-  const width=1100, height=620, center={x:width/2,y:height/2};
-  const points=new Map<string,{x:number;y:number;vx:number;vy:number}>();
-  const ordered=[...nodes].sort((a,b)=>a.kind.localeCompare(b.kind)||a.label.localeCompare(b.label));
-  ordered.forEach((node,index)=>{const angle=index*2.399963;const radius=65+Math.sqrt(index)*35;points.set(node.id,{x:center.x+Math.cos(angle)*radius,y:center.y+Math.sin(angle)*radius,vx:0,vy:0})});
-  for(let step=0;step<260;step++){
-    const force=new Map<string,{x:number;y:number}>();ordered.forEach(node=>force.set(node.id,{x:(center.x-points.get(node.id)!.x)*.004,y:(center.y-points.get(node.id)!.y)*.004}));
-    for(let i=0;i<ordered.length;i++)for(let j=i+1;j<ordered.length;j++){
-      const a=points.get(ordered[i].id)!,b=points.get(ordered[j].id)!;let dx=b.x-a.x,dy=b.y-a.y;let distance=Math.max(1,Math.hypot(dx,dy));
-      const push=1100/(distance*distance)+Math.max(0,105-distance)*.018;const fx=dx/distance*push,fy=dy/distance*push;
-      force.get(ordered[i].id)!.x-=fx;force.get(ordered[i].id)!.y-=fy;force.get(ordered[j].id)!.x+=fx;force.get(ordered[j].id)!.y+=fy;
-    }
-    for(const edge of edges){const a=points.get(edge.source),b=points.get(edge.target);if(!a||!b)continue;const dx=b.x-a.x,dy=b.y-a.y,distance=Math.max(1,Math.hypot(dx,dy));const pull=(distance-175)*.0018,fx=dx/distance*pull,fy=dy/distance*pull;force.get(edge.source)!.x+=fx;force.get(edge.source)!.y+=fy;force.get(edge.target)!.x-=fx;force.get(edge.target)!.y-=fy;}
-    for(const node of ordered){const point=points.get(node.id)!,f=force.get(node.id)!;point.vx=(point.vx+f.x)*.78;point.vy=(point.vy+f.y)*.78;point.x=Math.max(72,Math.min(width-72,point.x+point.vx));point.y=Math.max(58,Math.min(height-58,point.y+point.vy));}
-  }
-  return Object.fromEntries([...points].map(([id,p])=>[id,{x:p.x,y:p.y}]));
-}
-
 function GraphPanel({graph}: {graph?: ContractGraph}) {
-  const data=graph?.graph; const nodes=data?.nodes || []; const edges=data?.edges || [];
-  const [selected,setSelected]=useState<GraphNode>(); const [zoom,setZoom]=useState(1); const [pan,setPan]=useState({x:0,y:0});
-  const drag=useRef<{x:number;y:number;panX:number;panY:number}|null>(null);
-  const positions=useMemo(()=>forceGraphLayout(nodes,edges),[nodes,edges]);
-  const colors:Record<string,string>={document:'#294f46',chunk:'#8aa39a',clause:'#3c8c73',topic:'#c29442',party:'#6b78b4',date:'#a66a99',amount:'#b96854',obligation:'#ce704b',deliverable:'#427da1',term:'#9270a8'};
-  const kinds=[...new Set(nodes.map(node=>node.kind))];
-  const connected=selected?edges.filter(edge=>edge.source===selected.id||edge.target===selected.id):[];
-  const wheel=(event:React.WheelEvent<SVGSVGElement>)=>{event.preventDefault();setZoom(value=>Math.max(.45,Math.min(2.8,value*(event.deltaY<0?1.12:.89))))};
-  const startDrag=(event:React.PointerEvent<SVGSVGElement>)=>{drag.current={x:event.clientX,y:event.clientY,panX:pan.x,panY:pan.y};event.currentTarget.setPointerCapture(event.pointerId)};
-  const moveDrag=(event:React.PointerEvent<SVGSVGElement>)=>{if(!drag.current)return;const box=event.currentTarget.getBoundingClientRect();setPan({x:drag.current.panX+(event.clientX-drag.current.x)*1100/box.width,y:drag.current.panY+(event.clientY-drag.current.y)*620/box.height})};
-  const label=(value:string)=>value.length>26?`${value.slice(0,25)}…`:value;
-  const method=data?.extraction?.method;
-  return <div className="analysis-popover graph-panel"><div className="analysis-title"><span><Activity size={15}/> {data?.document_name || 'Contract'} · relationship graph</span><b>{nodes.length} entities · {edges.length} relations</b></div><div className="graph-toolbar"><span>{method==='whole-contract-model-evidence-checked'?`Whole-contract graph · ${data?.extraction?.model || 'selected model'}`:method==='local-fallback'?'Local fallback graph · model extraction unavailable':'Local-rule graph · choose a review model for named-entity extraction'}{data?.extraction?.warning&&<small className="graph-warning">{data.extraction.warning}</small>}</span>{nodes.length>0&&<div className="graph-controls"><button aria-label="Zoom out" title="Zoom out" onClick={()=>setZoom(value=>Math.max(.45,value/1.2))}><ZoomOut size={14}/></button><span>{Math.round(zoom*100)}%</span><button aria-label="Zoom in" title="Zoom in" onClick={()=>setZoom(value=>Math.min(2.8,value*1.2))}><ZoomIn size={14}/></button><button aria-label="Reset graph view" title="Reset view" onClick={()=>{setZoom(1);setPan({x:0,y:0})}}><Maximize2 size={14}/></button></div>}</div>{nodes.length>0?<><div className="graph-scroll"><svg className="contract-graph" viewBox="0 0 1100 620" onWheel={wheel} onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={()=>{drag.current=null}} onPointerCancel={()=>{drag.current=null}} role="group" aria-label="Interactive contract entity relationship graph"><title>Drag to pan, scroll to zoom, and select an entity to inspect its evidence and relationships</title><g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>{edges.map((edge,index)=>{const from=positions[edge.source],to=positions[edge.target];if(!from||!to)return null;const emphasized=!selected||edge.source===selected.id||edge.target===selected.id;const color=emphasized?'#789c8a':'#d5e2db';return <g key={`${edge.source}-${edge.target}-${edge.relation}-${index}`} opacity={emphasized?1:.42}><line x1={from.x} y1={from.y} x2={to.x} y2={to.y} className="graph-edge" style={{stroke:color}}/><text x={(from.x+to.x)/2} y={(from.y+to.y)/2-6} className="graph-edge-label">{label(edge.relation.replaceAll('_',' ').toLowerCase())}</text></g>})}{nodes.map(node=>{const point=positions[node.id];const active=node.id===selected?.id;const radius=active?19:node.kind==='chunk'?8:13;return <g key={node.id} className={'graph-node '+(active?'selected':'')} tabIndex={0} role="button" aria-label={`${node.kind}: ${node.label}`} onPointerDown={event=>event.stopPropagation()} onClick={()=>setSelected(node)} onKeyDown={event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();setSelected(node)}}}><title>{node.label}</title><circle cx={point.x} cy={point.y} r={radius} fill={colors[node.kind]||'#84948d'}/><text x={point.x} y={point.y+radius+17} textAnchor="middle" className="graph-node-label">{label(node.label)}</text></g>})}</g></svg></div><div className="graph-legend">{kinds.map(kind=><span key={kind}><i style={{background:colors[kind]||'#84948d'}}/>{data?.legend?.[kind]||kind}</span>)}</div>{selected&&<div className="graph-inspector"><div><strong>{selected.label}</strong><span>{data?.legend?.[selected.kind]||selected.kind} · {connected.length} linked relation{connected.length===1?'':'s'}</span></div>{connected.length>0?<ul>{connected.map((edge,index)=>{const other=nodes.find(node=>node.id===(edge.source===selected.id?edge.target:edge.source));return <li key={`${edge.source}-${edge.target}-${index}`}><b>{edge.relation.replaceAll('_',' ').toLowerCase()}</b><span>{edge.source===selected.id?'→':'←'} {other?.label||'Unknown entity'}</span>{(edge.evidence_sources||((edge.page&&edge.evidence)?[{chunk_id:edge.chunk_id||'',page:edge.page,quote:edge.evidence}]:[])).map((proof,proofIndex)=><small key={`${proof.chunk_id}-${proofIndex}`}>Page {proof.page}: {proof.quote} <PdfLink contractId={currentContractId} page={proof.page}>Open evidence</PdfLink></small>)}</li>})}</ul>:selected.evidence?.map((proof,index)=><p className="graph-proof" key={`${proof.chunk_id}-${index}`}>Page {proof.page}: “{proof.quote}” <PdfLink contractId={currentContractId} page={proof.page}>Open source</PdfLink></p>)}</div>}</>:<div className="graph-empty"><Activity size={20}/><p>{data?.extraction?.warning||'No saved relationship graph is available. Open Review report and select Re-run contract review to build it.'}</p></div>}</div>;
+  return <GraphExplorer key={currentContractId} contractId={currentContractId} graph={graph?.graph}/>;
 }
 
 function AgentActivityDashboard({telemetry, running, selectedAgent, onSelectAgent}: {telemetry: AgentTelemetry; running: boolean; selectedAgent: string; onSelectAgent: (name: string) => void}) {
