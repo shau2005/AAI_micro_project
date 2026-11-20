@@ -24,6 +24,24 @@ class LocalStore:
         with sqlite3.connect(self.db) as c: row=c.execute("select data from contracts where id=?",(cid,)).fetchone()
         if not row: raise KeyError(cid)
         return ContractMeta.model_validate_json(row[0])
+    def delete_contract(self, cid):
+        # Only remove files belonging to this stored document, never shared data.
+        self.get_meta(cid)
+        if not cid or "/" in cid or "\\" in cid or cid in {".", ".."}:
+            raise ValueError("Invalid contract ID")
+        from .vector_store import delete_contract as delete_vectors
+        delete_vectors(cid)
+        for directory in ("contracts", "extracted", "pages", "chunks", "embeddings", "indexes", "reports", "cache"):
+            for path in (self.root / directory).iterdir():
+                if path.is_file() and (path.name == cid or path.name.startswith(cid + ".")):
+                    path.unlink()
+        with sqlite3.connect(self.db) as connection:
+            connection.execute("delete from messages where contract_id=?", (cid,))
+            connection.execute("delete from findings where contract_id=?", (cid,))
+            connection.execute("delete from contracts where id=?", (cid,))
+        from .retrieval import HybridRetriever
+        HybridRetriever._cache.pop(cid, None)
+
     def reusable_contract(self,cid,filename,digest,workspace_id):
         try: meta=self.get_meta(cid)
         except KeyError: return None

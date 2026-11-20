@@ -1,10 +1,12 @@
-import React, {useEffect, useMemo, useRef, useState} from 'react';
+import React, {useEffect, useMemo, useRef, useState, useSyncExternalStore} from 'react';
 import {createRoot} from 'react-dom/client';
 import ReactMarkdown from 'react-markdown';
-import {Activity, AlertTriangle, ArrowUpRight, CheckCircle2, ChevronRight, FileText, Info, Plus, RotateCcw, Send, ShieldCheck, Sparkles, Upload, X, MessageSquare, ListChecks, BookOpen} from 'lucide-react';
+import {Activity, AlertTriangle, ArrowUpRight, CheckCircle2, ChevronRight, FileText, Info, Plus, RotateCcw, Send, Trash2, ShieldCheck, Sparkles, Upload, X, MessageSquare, ListChecks, BookOpen} from 'lucide-react';
 import './style.css';
 import {PdfLink, PdfProvider} from './PdfLinks';
 import {selectPerspective} from './review-state';
+import {DocumentChatSessions} from './document-chat';
+import {FindingExplanation} from './FindingExplanation';
 
 const API = `${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/api`;
 const REVIEW_QUESTION = 'Review financial, liability, privacy, intellectual property, compliance, and termination risks.';
@@ -21,7 +23,7 @@ type Contract = {
 type Citation = {page: number; clause?: string; quote: string; chunk_id: string};
 type RetrievalTrace = {query?: string; queries?: Record<string,string>; candidate_chunk_ids?: string[]; answer_chunk_ids?: string[]};
 type Message = {role: string; content: string; citations?: Citation[]; model?: string; retrieval_trace?: RetrievalTrace};
-type Finding = {finding_id: string; category: string; severity: string; claim: string; recommendation: string; proposed_language?: string; reasoning?: string; evidence?: Citation[]};
+type Finding = {finding_id: string; category: string; severity: string; claim: string; recommendation: string; proposed_language?: string; reasoning?: string; simple_explanation?: string; severity_reason?: string; practical_example?: string; source_explanation?: string; perspective_note?: string; evidence?: Citation[]};
 type ReviewResult = {findings: Finding[]; summary?: {score?: number | null; rationale?: string}};
 type Review = ReviewResult & {perspective_reviews?: Record<string,ReviewResult>};
 type Model = {id: string; name: string; provider: string};
@@ -32,16 +34,21 @@ type MCPStatus = {server_status?: string; transport?: string; internet_search_st
 function App() {
   const [files, setFiles] = useState<File[]>([]);
   const [contracts, setContracts] = useState<Contract[]>([]);
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [active, setActive] = useState<Contract>();
   const [review, setReview] = useState<Review & {agents?: ReviewArtifacts}>();
   const [reportLoading, setReportLoading] = useState(false);
   const [reportReloadToken, setReportReloadToken] = useState(0);
   const [reviewArtifacts, setReviewArtifacts] = useState<ReviewArtifacts>();
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [question, setQuestion] = useState('');
+  const [chatSessions] = useState(() => new DocumentChatSessions<Message>());
+  const chat = useSyncExternalStore(chatSessions.subscribe, () => chatSessions.get(active?.contract_id));
+  const {messages, draft: question, busy: chatBusy} = chat;
+  const setQuestion = (value: string) => { if (active) chatSessions.setDraft(active.contract_id, value); };
+  const [deletingId, setDeletingId] = useState<string>();
+  const [deleteError, setDeleteError] = useState('');
+  const [pdfRevision, setPdfRevision] = useState(0);
+  const activeId = useRef<string | undefined>(undefined);
+  activeId.current = active?.contract_id;
   const [busy, setBusy] = useState(false);
-  const [chatBusy, setChatBusy] = useState(false);
   const [models, setModels] = useState<Model[]>([]);
   const [analysisModel, setAnalysisModel] = useState('');
   const [chatModel, setChatModel] = useState('');
@@ -50,6 +57,7 @@ function App() {
   const [reviewPerspectives, setReviewPerspectives] = useState<Record<string,string>>({});
   const [telemetry, setTelemetry] = useState<AgentTelemetry>({master: {status: 'waiting', accessible_log: true}, agents: {}, events: []});
   const inputRef = useRef<HTMLInputElement>(null);
+  const documentSelection = useRef(0);
   const cancelPoll = useRef<() => void>(() => {});
   const workspaceId = useMemo(() => {
     const key = 'ps9-workspace-id';
@@ -57,7 +65,6 @@ function App() {
     if (!id) { id = crypto.randomUUID(); sessionStorage.setItem(key, id); }
     return id;
   }, []);
-  const readyIds = useMemo(() => new Set(contracts.filter(c => c.processing_status === 'ready').map(c => c.contract_id)), [contracts]);
   const ready = active?.processing_status === 'ready';
   const reviewPerspective = active ? reviewPerspectives[active.contract_id] || 'contract_giver' : 'contract_giver';
   const fetchApi = (input: RequestInfo | URL, init: RequestInit = {}) =>
@@ -72,7 +79,6 @@ function App() {
     ]).then(([loadedContracts, available, mcp]) => {
       if (cancelled) return;
       setContracts(loadedContracts);
-      setSelectedIds(loadedContracts.filter((c: Contract) => c.processing_status === 'ready').map((c: Contract) => c.contract_id));
       setModels(available.models || []);
       setAnalysisModel(available.default || '');
       setChatModel(available.default || '');
@@ -90,7 +96,6 @@ function App() {
         const next: Contract = await response.json();
         setActive(next);
         setContracts(items => items.map(item => item.contract_id === next.contract_id ? next : item));
-        if (next.processing_status === 'ready') setSelectedIds(ids => ids.includes(next.contract_id) ? ids : [...ids, next.contract_id]);
         if (next.analysis_status === 'complete' && active.analysis_status !== 'complete') {
           const report = await fetchApi(`${API}/contracts/${next.contract_id}/review`);
           if (!cancelled && report.ok) {
@@ -156,20 +161,63 @@ function App() {
     return () => { cancelled = true; };
   }, [active?.contract_id, active?.analysis_status]);
 
+  const loadChat = (id: string) => chatSessions.load(id, async () => {
+    const response = await fetchApi(`${API}/contracts/${encodeURIComponent(id)}/messages`);
+    if (!response.ok) throw new Error('Could not load conversation');
+    return response.json();
+  });
+
+  useEffect(() => {
+    if (active) void loadChat(active.contract_id);
+  }, [active?.contract_id]);
+
   const load = async (contract: Contract) => {
+    const selection = ++documentSelection.current;
+    setActive(contract);
+    setReview(undefined);
+    setReviewArtifacts(undefined);
     setAnalysisOpen(false);
-    const [contractResponse, reviewResponse, messagesResponse] = await Promise.all([
-      fetchApi(`${API}/contracts/${contract.contract_id}`),
-      fetchApi(`${API}/contracts/${contract.contract_id}/review`),
-      fetchApi(`${API}/workspace/messages`),
-    ]);
-    const next = contractResponse.ok ? await contractResponse.json() : contract;
-    setActive(next);
-    setContracts(items => items.map(item => item.contract_id === next.contract_id ? next : item));
-    const loadedReview = reviewResponse.ok ? await reviewResponse.json() : {findings: []};
-    setReview(loadedReview);
-    setReviewArtifacts(loadedReview.agents || undefined);
-    setMessages(messagesResponse.ok ? await messagesResponse.json() : []);
+    try {
+      const [contractResponse, reviewResponse] = await Promise.all([
+        fetchApi(`${API}/contracts/${contract.contract_id}`),
+        fetchApi(`${API}/contracts/${contract.contract_id}/review`),
+      ]);
+      const next = contractResponse.ok ? await contractResponse.json() : contract;
+      const loadedReview = reviewResponse.ok ? await reviewResponse.json() : {findings: []};
+      if (selection !== documentSelection.current) return;
+      setActive(next);
+      setContracts(items => items.map(item => item.contract_id === next.contract_id ? next : item));
+      setReview(loadedReview);
+      setReviewArtifacts(loadedReview.agents || undefined);
+    } catch (error) { console.error('Could not load document', error); }
+  };
+
+  const removeContract = async (contract: Contract) => {
+    if (deletingId || busy || chatSessions.get(contract.contract_id).busy) return;
+    if (!window.confirm(`Delete “${contract.original_filename}”? This removes its uploaded PDF, review, and document chat. You can upload it again for a fresh review.`)) return;
+    setDeletingId(contract.contract_id);
+    setDeleteError('');
+    try {
+      const response = await fetchApi(`${API}/contracts/${encodeURIComponent(contract.contract_id)}`, {method: 'DELETE'});
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        throw new Error(detail.detail || 'Could not delete this contract. Please retry.');
+      }
+      if (activeId.current === contract.contract_id) {
+        ++documentSelection.current;
+        cancelPoll.current();
+        setActive(undefined);
+        setReview(undefined);
+        setReviewArtifacts(undefined);
+        setAnalysisOpen(false);
+      }
+      chatSessions.forget(contract.contract_id);
+      setContracts(items => items.filter(item => item.contract_id !== contract.contract_id));
+      setReviewPerspectives(items => { const next = {...items}; delete next[contract.contract_id]; return next; });
+      setPdfRevision(value => value + 1);
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : 'Could not delete this contract. Please retry.');
+    } finally { setDeletingId(undefined); }
   };
 
   const upload = async () => {
@@ -189,6 +237,7 @@ function App() {
         const contract: Contract = await response.json();
         if (contract.analysis_status === 'complete') setReportReloadToken(value => value + 1);
         setContracts(items => [contract, ...items.filter(item => item.contract_id !== contract.contract_id)]);
+        ++documentSelection.current;
         setActive(contract);
         setReview({findings: []});
         setReviewArtifacts(undefined);
@@ -205,22 +254,17 @@ function App() {
 
   const ask = async (event?: React.FormEvent) => {
     event?.preventDefault();
-    if (!ready || !question.trim() || !selectedIds.some(id => readyIds.has(id)) || chatBusy) return;
-    const text = question.trim();
-    setQuestion('');
-    setChatBusy(true);
-    setMessages(items => [...items, {role: 'user', content: text}]);
-    try {
-      const response = await fetchApi(`${API}/workspace/chat`, {
+    if (!active || !ready) return;
+    const id = active.contract_id;
+    const model = chatModel || null;
+    await chatSessions.send(id, async text => {
+      const response = await fetchApi(`${API}/contracts/${encodeURIComponent(id)}/chat`, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({message: text, contract_ids: selectedIds.filter(id => readyIds.has(id)), model: chatModel || null}),
+        body: JSON.stringify({message: text, model}),
       });
-      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `Chat request failed (${response.status})`);
-      const reply: Message = await response.json();
-      setMessages(items => [...items, reply]);
-    } catch (error) {
-      setMessages(items => [...items, {role: 'assistant', content: `Model API error: ${error instanceof Error ? error.message : String(error)}`}]);
-    } finally { setChatBusy(false); }
+      if (!response.ok) throw new Error('Chat request failed');
+      return response.json();
+    });
   };
 
   const runReview = async () => {
@@ -270,10 +314,10 @@ function App() {
     medium: findings.filter(f => f.severity === 'MEDIUM').length,
     low: findings.filter(f => f.severity === 'LOW').length,
   };
-  return <PdfProvider apiBase={API} workspaceId={workspaceId}><div className="app"><Header onNew={() => inputRef.current?.click()}/><div className="shell">
-    <ContractSidebar contracts={contracts} active={active} selectedIds={selectedIds} onToggle={id => setSelectedIds(ids => ids.includes(id) ? ids.filter(item => item !== id) : [...ids, id])} files={files} busy={busy} inputRef={inputRef} onFiles={setFiles} onPick={() => inputRef.current?.click()} onUpload={upload} onLoad={load} models={models} reviewModel={analysisModel} setReviewModel={setAnalysisModel}/>
+  return <PdfProvider apiBase={API} workspaceId={workspaceId} revision={pdfRevision}><div className="app"><Header onNew={() => inputRef.current?.click()}/><div className="shell">
+    <ContractSidebar contracts={contracts} active={active} onDelete={removeContract} deletingId={deletingId} deleteError={deleteError} isChatBusy={id => chatSessions.get(id).busy} files={files} busy={busy} inputRef={inputRef} onFiles={setFiles} onPick={() => inputRef.current?.click()} onUpload={upload} onLoad={load} models={models} reviewModel={analysisModel} setReviewModel={setAnalysisModel}/>
     <main>{!active ? <Welcome onPick={() => inputRef.current?.click()}/> : <div className="chat-layout">
-      <ChatColumn active={active} ready={ready} messages={messages} evidence={evidence} artifacts={reviewArtifacts} telemetry={telemetry} mcpStatus={mcpStatus} question={question} setQuestion={setQuestion} ask={ask} chatBusy={chatBusy} analysisOpen={analysisOpen} setAnalysisOpen={setAnalysisOpen} model={chatModel} setModel={setChatModel} models={models} reviewPanel={<ReportRail reportLoading={reportLoading} findings={findings} counts={counts} score={selectedReview?.summary?.score} scoreRationale={selectedReview?.summary?.rationale} artifacts={reviewArtifacts} busy={busy} analysisStatus={active.analysis_status} analysisProgress={active.analysis_progress} analysisStage={active.analysis_stage} perspective={reviewPerspective} hasBothPerspectives={hasBothPerspectives} onPerspectiveChange={value => setReviewPerspectives(previous => ({...previous,[active.contract_id]:value}))} onOpenAnalysis={() => { setAnalysisOpen(true); }} onRetry={runReview}/>}/>
+      <ChatColumn active={active} ready={ready} messages={messages} evidence={evidence} artifacts={reviewArtifacts} telemetry={telemetry} mcpStatus={mcpStatus} question={question} setQuestion={setQuestion} ask={ask} chatBusy={chatBusy} chatLoading={chat.loading || !chat.loaded} chatError={chat.error} onRetryChat={() => { if (active) void loadChat(active.contract_id); }} analysisOpen={analysisOpen} setAnalysisOpen={setAnalysisOpen} model={chatModel} setModel={setChatModel} models={models} reviewPanel={<ReportRail reportLoading={reportLoading} findings={findings} counts={counts} score={selectedReview?.summary?.score} scoreRationale={selectedReview?.summary?.rationale} artifacts={reviewArtifacts} busy={busy} analysisStatus={active.analysis_status} analysisProgress={active.analysis_progress} analysisStage={active.analysis_stage} perspective={reviewPerspective} hasBothPerspectives={hasBothPerspectives} onPerspectiveChange={value => setReviewPerspectives(previous => ({...previous,[active.contract_id]:value}))} onOpenAnalysis={() => { setAnalysisOpen(true); }} onRetry={runReview}/>}/>
     </div>}</main>
   </div></div></PdfProvider>;
 }
@@ -286,11 +330,11 @@ function Welcome({onPick}: {onPick: () => void}) {
   return <div className="welcome"><span className="welcome-kicker"><ShieldCheck size={18}/> Evidence-led contract review</span><h1>Read the fine print.<br/><span>See the bigger picture.</span></h1><p>A clear workspace for understanding your contracts, comparing both parties’ interests, and checking every concern against the original document.</p><button className="primary" onClick={onPick}><Upload size={20}/> Upload a contract</button><span className="welcome-format">PDF documents · Automatic review · Source-linked answers</span><div className="welcome-features"><article><span><FileText size={22}/></span><h2>Bring your document</h2><p>Upload an agreement, deed, or tender. The review starts automatically.</p></article><article><span><ShieldCheck size={22}/></span><h2>Understand the risks</h2><p>Compare party perspectives and see which clauses deserve attention.</p></article><article><span><MessageSquare size={22}/></span><h2>Ask with confidence</h2><p>Get plain-language answers with links to the supporting contract text.</p></article></div><div className="welcome-note"><Info size={18}/><span>AI helps you find and understand review points. Always check the cited wording before making a decision.</span></div></div>;
 }
 
-function ContractSidebar({contracts, active, selectedIds, onToggle, files, busy, inputRef, onFiles, onPick, onUpload, onLoad, models, reviewModel, setReviewModel}: {contracts: Contract[]; active?: Contract; selectedIds: string[]; onToggle: (id: string) => void; files: File[]; busy: boolean; inputRef: React.RefObject<HTMLInputElement | null>; onFiles: (files: File[]) => void; onPick: () => void; onUpload: () => void; onLoad: (contract: Contract) => void; models: Model[]; reviewModel: string; setReviewModel: (value: string) => void}) {
-  return <aside className="contracts"><div className="sidebar-heading"><span className="eyebrow">YOUR WORKSPACE</span><h2>Documents <span>{contracts.length}</span></h2></div><button className="drop-mini" onClick={onPick}><span className="upload-icon"><Upload size={24}/></span><strong>Add a contract</strong><small>Choose a PDF to review</small></button><input ref={inputRef} hidden type="file" multiple accept="application/pdf" onChange={event => onFiles(Array.from(event.target.files || []))}/>{files.length > 0 && <div className="queued"><strong>{files.length} document{files.length > 1 ? 's' : ''} ready</strong><ul>{files.map(file=><li key={file.name}>{file.name}</li>)}</ul><label className="upload-model">Review model<select value={reviewModel} onChange={event => setReviewModel(event.target.value)} disabled={busy}><option value="">Local review · no model</option>{models.map(model=><option key={model.id} value={model.id}>{model.name} · {model.provider}</option>)}</select></label><p className="model-hint">The selected model reviews both parties’ perspectives.</p><button className="primary" onClick={onUpload} disabled={busy}>{busy ? 'Uploading…' : 'Upload & review'}</button></div>}<div className="side-title recent">Contract library</div>{contracts.length ? <><p className="sidebar-help">Check documents to include them in chat.</p><div className="contract-list">{contracts.map(contract=><div className={'contract-row '+(active?.contract_id===contract.contract_id?'is-active':'')} key={contract.contract_id}><input type="checkbox" disabled={contract.processing_status!=='ready'} checked={selectedIds.includes(contract.contract_id)} onChange={()=>onToggle(contract.contract_id)} aria-label={`Use ${contract.original_filename} in chat`}/><button className={'contract '+(active?.contract_id===contract.contract_id?'selected':'')} aria-current={active?.contract_id===contract.contract_id?'page':undefined} onClick={()=>onLoad(contract)}><FileText size={21}/><span><b title={contract.original_filename}>{contract.original_filename.replace(/\.pdf$/i,'').replace(/_/g,' ')}</b><small>{contract.processing_status==='ready'?`${contract.page_count} pages · ${contract.analysis_status==='complete'?'Reviewed':contract.analysis_status==='failed'?'Review needs attention':'Review in progress'}`:`${contract.indexing_progress||0}% · ${contract.indexing_stage}`}</small></span></button></div>)}</div></> : <div className="library-empty"><FileText size={24}/><strong>Your library starts here</strong><p>Uploaded contracts will appear here for review and chat.</p></div>}<div className="sidebar-footer"><ShieldCheck size={19}/><div><strong>Your local workspace</strong><p>Documents and reviews are saved on this computer.</p></div></div></aside>;
+function ContractSidebar({contracts, active, onDelete, deletingId, deleteError, isChatBusy, files, busy, inputRef, onFiles, onPick, onUpload, onLoad, models, reviewModel, setReviewModel}: {contracts: Contract[]; active?: Contract; onDelete: (contract: Contract) => void; deletingId?: string; deleteError: string; isChatBusy: (id: string) => boolean; files: File[]; busy: boolean; inputRef: React.RefObject<HTMLInputElement | null>; onFiles: (files: File[]) => void; onPick: () => void; onUpload: () => void; onLoad: (contract: Contract) => void; models: Model[]; reviewModel: string; setReviewModel: (value: string) => void}) {
+  return <aside className="contracts"><div className="sidebar-heading"><span className="eyebrow">YOUR WORKSPACE</span><h2>Documents <span>{contracts.length}</span></h2></div><button className="drop-mini" onClick={onPick}><span className="upload-icon"><Upload size={24}/></span><strong>Add a contract</strong><small>Choose a PDF to review</small></button><input ref={inputRef} hidden type="file" multiple accept="application/pdf" onChange={event => onFiles(Array.from(event.target.files || []))}/>{files.length > 0 && <div className="queued"><strong>{files.length} document{files.length > 1 ? 's' : ''} ready</strong><ul>{files.map(file=><li key={file.name}>{file.name}</li>)}</ul><label className="upload-model">Review model<select value={reviewModel} onChange={event => setReviewModel(event.target.value)} disabled={busy}><option value="">Local review · no model</option>{models.map(model=><option key={model.id} value={model.id}>{model.name} · {model.provider}</option>)}</select></label><p className="model-hint">The selected model reviews both parties’ perspectives.</p><button className="primary" onClick={onUpload} disabled={busy}>{busy ? 'Uploading…' : 'Upload & review'}</button></div>}<div className="side-title recent">Contract library</div>{deleteError&&<p className="delete-error" role="alert">{deleteError}</p>}{contracts.length ? <><p className="sidebar-help">Open a document to view its own report and private chat history.</p><div className="contract-list">{contracts.map(contract=><div className={'contract-row '+(active?.contract_id===contract.contract_id?'is-active':'')} key={contract.contract_id}><button className={'contract '+(active?.contract_id===contract.contract_id?'selected':'')} aria-current={active?.contract_id===contract.contract_id?'page':undefined} onClick={()=>onLoad(contract)}><FileText size={21}/><span><b title={contract.original_filename}>{contract.original_filename.replace(/\.pdf$/i,'').replace(/_/g,' ')}</b><small>{contract.processing_status==='ready'?`${contract.page_count} pages · ${contract.analysis_status==='complete'?'Reviewed':contract.analysis_status==='failed'?'Review needs attention':'Review in progress'}`:`${contract.indexing_progress||0}% · ${contract.indexing_stage}`}</small></span></button><button className="delete-contract" aria-label={`Delete ${contract.original_filename}`} title={contract.processing_status==='indexing'||(contract.processing_status!=='failed'&&['queued','running'].includes(contract.analysis_status))?'Wait for processing to finish before deleting':'Delete contract'} disabled={busy||!!deletingId||isChatBusy(contract.contract_id)||contract.processing_status==='indexing'||(contract.processing_status!=='failed'&&['queued','running'].includes(contract.analysis_status))} onClick={()=>onDelete(contract)}>{deletingId===contract.contract_id?<Activity size={17}/>:<Trash2 size={17}/>}</button></div>)}</div></> : <div className="library-empty"><FileText size={24}/><strong>Your library starts here</strong><p>Uploaded contracts will appear here for review and chat.</p></div>}<div className="sidebar-footer"><ShieldCheck size={19}/><div><strong>Your local workspace</strong><p>Documents and reviews are saved on this computer.</p></div></div></aside>;
 }
 
-function ChatColumn(props: {active: Contract; ready: boolean; messages: Message[]; evidence: Citation[]; artifacts?: ReviewArtifacts; telemetry: AgentTelemetry; mcpStatus?: MCPStatus; question: string; setQuestion: (value: string) => void; ask: (event?: React.FormEvent) => void; chatBusy: boolean; analysisOpen: boolean; setAnalysisOpen: (value: boolean) => void; model: string; setModel: (value: string) => void; models: Model[]; reviewPanel: React.ReactNode}) {
+function ChatColumn(props: {active: Contract; ready: boolean; messages: Message[]; evidence: Citation[]; artifacts?: ReviewArtifacts; telemetry: AgentTelemetry; mcpStatus?: MCPStatus; question: string; setQuestion: (value: string) => void; ask: (event?: React.FormEvent) => void; chatBusy: boolean; chatLoading: boolean; chatError: string; onRetryChat: () => void; analysisOpen: boolean; setAnalysisOpen: (value: boolean) => void; model: string; setModel: (value: string) => void; models: Model[]; reviewPanel: React.ReactNode}) {
   const [tab,setTab]=useState('review');
   const [selectedAgent,setSelectedAgent]=useState('');
   useEffect(()=>{setTab('review');setSelectedAgent('');},[props.active.contract_id]);
@@ -304,7 +348,7 @@ function ChatColumn(props: {active: Contract; ready: boolean; messages: Message[
     {view==='checks'&&<><div className="section-heading"><span className="eyebrow">VERIFY THE DETAILS</span><h2>Evidence & document checks</h2><p>Compare the extracted signals with the original contract and inspect the sources behind chat answers.</p></div><EvidencePanel evidence={props.evidence} trace={retrievalTrace}/><AnalysisDetailsPanel artifacts={props.artifacts}/></>}
     {view==='research'&&<><div className="section-heading"><span className="eyebrow">ADDITIONAL CONTEXT</span><h2>Official-source research</h2><p>Classification and government-source searches provide context alongside the contract. Follow the source links to verify the material.</p></div><MCPToolPanel artifacts={props.artifacts} telemetry={props.telemetry} serverStatus={props.mcpStatus} running={running}/></>}
     {view==='agents'&&<><div className="section-heading"><span className="eyebrow">REVIEW TRANSPARENCY</span><h2>Agent activity</h2><p>See what each review step does, what it found, and whether anything needs attention.</p></div><AgentActivityDashboard telemetry={props.telemetry} running={running} selectedAgent={selectedAgent} onSelectAgent={setSelectedAgent}/></>}
-    {view==='chat'&&<div className="conversation"><div className="section-heading"><span className="eyebrow">ASK YOUR CONTRACT</span><h2>From legal language to clear answers</h2><p>Ask about responsibilities, key terms, or review points. Answers use the documents selected in your library.</p></div><div className="messages">{!props.ready?<div className="chat-empty"><h2>Preparing your contract</h2><p>{props.active.indexing_stage} · {props.active.indexing_progress}% complete.</p></div>:props.messages.length===0?<EmptyChat onSuggest={props.setQuestion}/>:props.messages.map((message,index)=><div className={'message '+message.role} key={index}><div className="avatar">{message.role==='user'?'You':<ShieldCheck size={20}/>}</div><div className="message-body"><span className="message-label">{message.role==='user'?'You':'Contract assistant'}</span><ReactMarkdown components={{a:({href,children})=><a href={href} target="_blank" rel="noreferrer">{children}</a>}}>{message.content}</ReactMarkdown>{message.citations?.length?<button className="source-link" onClick={()=>selectView('checks')}><FileText size={16}/>{message.citations.length} supporting source{message.citations.length===1?'':'s'}</button>:null}</div></div>)}{props.chatBusy&&<div className="typing"><Activity size={18}/>Checking the contract evidence…</div>}</div><form className="composer" onSubmit={props.ask}><div className="composer-top"><input disabled={!props.ready} value={props.question} onChange={event=>props.setQuestion(event.target.value)} placeholder="Ask a question about your contract…" aria-label="Your contract question"/><button disabled={!props.ready||props.chatBusy} aria-label="Send message"><Send size={20}/></button></div><div className="composer-meta"><span><ShieldCheck size={15}/>Grounded in your selected documents</span><label>Chat model<select value={props.model} onChange={event=>props.setModel(event.target.value)}><option value="">Automatic · default model</option><option value="local">Local source excerpts</option>{props.models.map(model=><option key={model.id} value={model.id}>{model.name} · {model.provider}</option>)}</select></label></div></form></div>}
+    {view==='chat'&&<div className="conversation"><div className="section-heading"><span className="eyebrow">ASK YOUR CONTRACT</span><h2>From legal language to clear answers</h2><p>Ask about responsibilities, key terms, or review points. This conversation uses only this document. Switch documents to open a separate chat.</p></div><div className="messages">{props.chatLoading?<div className="chat-empty" role="status"><p>Loading this document’s conversation…</p></div>:!props.ready?<div className="chat-empty"><h2>Preparing your contract</h2><p>{props.active.indexing_stage} · {props.active.indexing_progress}% complete.</p></div>:props.messages.length===0?<EmptyChat onSuggest={props.setQuestion}/>:props.messages.map((message,index)=><div className={'message '+message.role} key={index}><div className="avatar">{message.role==='user'?'You':<ShieldCheck size={20}/>}</div><div className="message-body"><span className="message-label">{message.role==='user'?'You':'Contract assistant'}</span><ReactMarkdown components={{a:({href,children})=><a href={href} target="_blank" rel="noreferrer">{children}</a>}}>{message.content}</ReactMarkdown>{message.citations?.length?<button className="source-link" onClick={()=>selectView('checks')}><FileText size={16}/>{message.citations.length} supporting source{message.citations.length===1?'':'s'}</button>:null}</div></div>)}{props.chatBusy&&<div className="typing"><Activity size={18}/>Checking the contract evidence…</div>}</div>{props.chatError&&<div className="chat-notice" role="alert">{props.chatError}{props.chatLoading&&<button type="button" onClick={props.onRetryChat}>Retry loading chat</button>}</div>}<form className="composer" onSubmit={props.ask}><div className="composer-top"><input disabled={!props.ready||props.chatLoading} value={props.question} onChange={event=>props.setQuestion(event.target.value)} placeholder="Ask a question about your contract…" aria-label="Your contract question"/><button disabled={!props.ready||props.chatLoading||props.chatBusy||!props.question.trim()} aria-label="Send message"><Send size={20}/></button></div><div className="composer-meta"><span><ShieldCheck size={15}/>Grounded in this document only</span><label>Chat model<select value={props.model} onChange={event=>props.setModel(event.target.value)}><option value="">Automatic · default model</option><option value="local">Local source excerpts</option>{props.models.map(model=><option key={model.id} value={model.id}>{model.name} · {model.provider}</option>)}</select></label></div></form></div>}
   </div></section>;
 }
 
@@ -352,7 +396,7 @@ function ReportRail({reportLoading, findings, counts, score, scoreRationale, art
   const scoreMessage=score!=null?(scoreRationale||'Based on identified risks and generic protection checks.'):analyzing?'The score will appear when review is complete.':analysisStatus==='failed'?analysisStage:'No review score is available yet.';
   const scoreClass=score==null?'':score>=75?'score-strong':score>=50?'score-review':'score-attention';
   if (reportLoading) return <section className="analysis-progress" role="status"><div><Activity size={20}/><strong>Loading your saved review…</strong></div><p>Your analysis is complete. Fetching the scores and findings.</p></section>;
-  return <section className="report-rail"><div className="report-overview"><div className="report-intro"><span className="eyebrow">YOUR CONTRACT AT A GLANCE</span><h2>A clearer view of what matters.</h2><p>Review the concerns for each party, understand the suggested next steps, and check the original wording.</p></div><div className={'score-card '+scoreClass}><div><span>Automated review score</span><strong>{score==null?'Review pending':score>=75?'Fewer flagged concerns':'Review recommended'}</strong></div><span className="report-score">{score==null?'—':score}<small>/100</small></span></div></div><div className="perspective-control"><div><strong>Whose perspective?</strong><p>{isGift?'Compare the person giving the property with the person receiving it.':'Different terms can create different concerns for each party.'}</p></div><div role="tablist" aria-label="Choose contract review perspective"><button role="tab" type="button" aria-selected={perspective==='contract_giver'} className={perspective==='contract_giver'?'selected':''} disabled={busy||analyzing} onClick={()=>onPerspectiveChange('contract_giver')}>{isGift?'Donor · giver':'Contract giver'}</button><button role="tab" type="button" aria-selected={perspective==='contract_acceptor'} className={perspective==='contract_acceptor'?'selected':''} disabled={busy||analyzing} onClick={()=>onPerspectiveChange('contract_acceptor')}>{isGift?'Donee · receiver':'Contract acceptor'}</button></div></div>{!hasBothPerspectives&&!analyzing&&<p className="muted">Complete a review to compare both perspectives.</p>}{(busy||analyzing)&&<div className="analysis-progress" role="status"><div><Activity size={20}/><strong>{analysisStage||'Starting review'}</strong><span>{analysisProgress||0}%</span></div><div className="progress-track"><i style={{width:`${Math.max(4,analysisProgress||0)}%`}}/></div><p>The review runs automatically. You can keep this workspace open while it finishes.</p></div>}{score==null&&!analyzing&&<button className="primary retry-review" onClick={onRetry} disabled={busy}><RotateCcw size={18}/>{analysisStatus==='failed'||analysisStatus==='complete'?'Retry contract review':'Start contract review'}</button>}<div className="risk-strip"><div><span className="risk-stat-icon high-text"><AlertTriangle size={22}/></span><div><strong className="high-text">{counts.high}</strong><small>High & critical</small></div><span>Check these first</span></div><div><span className="risk-stat-icon medium-text"><Info size={22}/></span><div><strong className="medium-text">{counts.medium}</strong><small>Medium priority</small></div><span>Review the details</span></div><div><span className="risk-stat-icon low-text"><CheckCircle2 size={22}/></span><div><strong className="low-text">{counts.low}</strong><small>Lower priority</small></div><span>Keep these in view</span></div></div><div className="report-summary-grid"><section className="report-guide"><div className="card-heading"><BookOpen size={20}/><h3>How to read your report</h3></div><p>The review score combines flagged risks and generic protection checks. Higher scores mean fewer flagged concerns for the selected party.</p><p>Each finding shows the concern, a suggested next step, and source text. A checklist gap may not apply to your deed; verify the wording before treating it as a defect.</p><details className="score-details"><summary>See the score calculation</summary><p>{scoreMessage}</p></details></section>{template?<section className="report-template"><div className="card-heading"><ListChecks size={20}/><h3>Document checklist</h3><b>{template.match_score==null?'—':`${template.match_score}/100`}</b></div><p className="template-name">{template.detected_type_name||template.summary}</p><div className="template-meta"><span>{(template.missing_clauses||[]).length} checklist gaps</span><span>{(template.red_flags||[]).length} red flags</span></div><p className="template-score-note">This checks expected clauses and structure. It measures something different from the review score.</p>{template.detection_confidence==='low'&&<p className="analysis-error">Document type is uncertain. Confirm it before relying on the checklist.</p>}<button onClick={onOpenAnalysis}><ListChecks size={16}/>View checklist details</button></section>:<section className="report-template"><div className="card-heading"><ListChecks size={20}/><h3>Document checklist</h3></div><p>Checklist results will appear after your document has been reviewed.</p></section>}</div><div className="findings-heading"><div><span className="eyebrow">REVIEW PRIORITIES</span><h3>Findings to review <span>{findings.length}</span></h3></div><p>{perspective==='contract_giver'?(isGift?'From the donor’s perspective':'From the contract giver’s perspective'):(isGift?'From the donee’s perspective':'From the contract acceptor’s perspective')}</p></div><div className="findings-list">{findings.map(finding=><article className="risk-item" key={finding.finding_id}><div className="risk-item-head"><span className={'severity-badge '+finding.severity.toLowerCase()}>{finding.severity}</span><span className="finding-category">{finding.category.replaceAll('_',' ')}</span></div><h3>{finding.claim}</h3><div className="finding-action"><span><CheckCircle2 size={18}/></span><p><b>Suggested next step</b>{finding.recommendation}</p></div><details className="finding-explanation"><summary>Why this was flagged & source</summary>{finding.reasoning&&<p>{finding.reasoning}</p>}{finding.evidence?.map((proof,index)=><blockquote key={`${proof.chunk_id}-${index}`}><p>“{proof.quote}”</p><PdfLink contractId={proof.chunk_id.split('_C')[0]} page={proof.page}><FileText size={16}/>Open source · page {proof.page}</PdfLink></blockquote>)}</details></article>)}</div>{!findings.length&&<div className="report-empty"><ShieldCheck size={32}/><h3>{analyzing?'Your review is on its way':score!=null?'No clause-level findings to show':'Ready when you are'}</h3><p>{analyzing?'Findings and source evidence will appear here when the analysis finishes.':score!=null?'Check the document checklist and original text for additional context.':'Upload a contract or start its review to see the results here.'}</p></div>}<div className="autonomous-note"><ShieldCheck size={18}/><span>AI-assisted review for understanding and prioritising issues. Check the cited text; the score does not certify legal validity.</span></div></section>;
+  return <section className="report-rail"><div className="report-overview"><div className="report-intro"><span className="eyebrow">YOUR CONTRACT AT A GLANCE</span><h2>A clearer view of what matters.</h2><p>Review the concerns for each party, understand the suggested next steps, and check the original wording.</p></div><div className={'score-card '+scoreClass}><div><span>Automated review score</span><strong>{score==null?'Review pending':score>=75?'Fewer flagged concerns':'Review recommended'}</strong></div><span className="report-score">{score==null?'—':score}<small>/100</small></span></div></div><div className="perspective-control"><div><strong>Whose perspective?</strong><p>{isGift?'Compare the person giving the property with the person receiving it.':'Different terms can create different concerns for each party.'}</p></div><div role="tablist" aria-label="Choose contract review perspective"><button role="tab" type="button" aria-selected={perspective==='contract_giver'} className={perspective==='contract_giver'?'selected':''} disabled={busy||analyzing} onClick={()=>onPerspectiveChange('contract_giver')}>{isGift?'Donor · giver':'Contract giver'}</button><button role="tab" type="button" aria-selected={perspective==='contract_acceptor'} className={perspective==='contract_acceptor'?'selected':''} disabled={busy||analyzing} onClick={()=>onPerspectiveChange('contract_acceptor')}>{isGift?'Donee · receiver':'Contract acceptor'}</button></div></div>{!hasBothPerspectives&&!analyzing&&<p className="muted">Complete a review to compare both perspectives.</p>}{(busy||analyzing)&&<div className="analysis-progress" role="status"><div><Activity size={20}/><strong>{analysisStage||'Starting review'}</strong><span>{analysisProgress||0}%</span></div><div className="progress-track"><i style={{width:`${Math.max(4,analysisProgress||0)}%`}}/></div><p>The review runs automatically. You can keep this workspace open while it finishes.</p></div>}{score==null&&!analyzing&&<button className="primary retry-review" onClick={onRetry} disabled={busy}><RotateCcw size={18}/>{analysisStatus==='failed'||analysisStatus==='complete'?'Retry contract review':'Start contract review'}</button>}<div className="risk-strip"><div><span className="risk-stat-icon high-text"><AlertTriangle size={22}/></span><div><strong className="high-text">{counts.high}</strong><small>High & critical</small></div><span>Check these first</span></div><div><span className="risk-stat-icon medium-text"><Info size={22}/></span><div><strong className="medium-text">{counts.medium}</strong><small>Medium priority</small></div><span>Review the details</span></div><div><span className="risk-stat-icon low-text"><CheckCircle2 size={22}/></span><div><strong className="low-text">{counts.low}</strong><small>Lower priority</small></div><span>Keep these in view</span></div></div><div className="report-summary-grid"><section className="report-guide"><div className="card-heading"><BookOpen size={20}/><h3>How to read your report</h3></div><p>The review score combines flagged risks and generic protection checks. Higher scores mean fewer flagged concerns for the selected party.</p><p>Each finding shows the concern, a suggested next step, and source text. A checklist gap may not apply to your deed; verify the wording before treating it as a defect.</p><details className="score-details"><summary>See the score calculation</summary><p>{scoreMessage}</p></details></section>{template?<section className="report-template"><div className="card-heading"><ListChecks size={20}/><h3>Document checklist</h3><b>{template.match_score==null?'—':`${template.match_score}/100`}</b></div><p className="template-name">{template.detected_type_name||template.summary}</p><div className="template-meta"><span>{(template.missing_clauses||[]).length} checklist gaps</span><span>{(template.red_flags||[]).length} red flags</span></div><p className="template-score-note">This checks expected clauses and structure. It measures something different from the review score.</p>{template.detection_confidence==='low'&&<p className="analysis-error">Document type is uncertain. Confirm it before relying on the checklist.</p>}<button onClick={onOpenAnalysis}><ListChecks size={16}/>View checklist details</button></section>:<section className="report-template"><div className="card-heading"><ListChecks size={20}/><h3>Document checklist</h3></div><p>Checklist results will appear after your document has been reviewed.</p></section>}</div><div className="findings-heading"><div><span className="eyebrow">REVIEW PRIORITIES</span><h3>Findings to review <span>{findings.length}</span></h3></div><p>{perspective==='contract_giver'?(isGift?'From the donor’s perspective':'From the contract giver’s perspective'):(isGift?'From the donee’s perspective':'From the contract acceptor’s perspective')}</p></div><div className="findings-list">{findings.map(finding=><article className="risk-item" key={finding.finding_id}><div className="risk-item-head"><span className={'severity-badge '+finding.severity.toLowerCase()}>{finding.severity}</span><span className="finding-category">{finding.category.replaceAll('_',' ')}</span></div><h3>{finding.claim}</h3><div className="finding-action"><span><CheckCircle2 size={18}/></span><p><b>Suggested next step</b>{finding.recommendation}</p></div><FindingExplanation finding={finding} perspective={perspective} documentType={artifacts?.classification?.document_type || template?.detected_type || ''}/></article>)}</div>{!findings.length&&<div className="report-empty"><ShieldCheck size={32}/><h3>{analyzing?'Your review is on its way':score!=null?'No clause-level findings to show':'Ready when you are'}</h3><p>{analyzing?'Findings and source evidence will appear here when the analysis finishes.':score!=null?'Check the document checklist and original text for additional context.':'Upload a contract or start its review to see the results here.'}</p></div>}<div className="autonomous-note"><ShieldCheck size={18}/><span>AI-assisted review for understanding and prioritising issues. Check the cited text; the score does not certify legal validity.</span></div></section>;
 }
 
 createRoot(document.getElementById('root')!).render(<App/>);

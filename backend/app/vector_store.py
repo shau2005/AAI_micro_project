@@ -42,3 +42,13 @@ def search(contract_id: str, vector: list[float], limit: int) -> list[str]:
     except Exception:
         return []
     return result.get("ids", [[]])[0]
+
+
+def delete_contract(contract_id: str) -> None:
+    """Remove this document's persisted vectors without creating a collection."""
+    if not (settings.data_dir / "chroma").exists():
+        return
+    try:
+        _client().delete_collection(name=f"contract_{contract_id.replace('-', '_')}")
+    except chromadb.errors.NotFoundError:
+        pass

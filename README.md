@@ -77,3 +77,9 @@ API diagnostics include `/api/health`, `/api/agents/telemetry`, `/api/contracts/
 4. No Graph RAG to retrieve information through entity relationships.
 
 Historical architecture notes in `PROJECT_DETAILS.md` describe the earlier version; this README describes the active baseline.
+
+Each document has its own saved chat history. Open a document in the library to ask questions about that document only. Switching documents preserves drafts and keeps delayed replies with their original conversation. Earlier shared workspace conversations remain saved separately.
+
+Use the trash icon beside a contract to delete its PDF, extracted data, search indexes, review, and document chat after confirmation. Deletion is unavailable during indexing or review. Uploading the same PDF afterward starts a fresh review.
+
+Finding details explain the concern in everyday language, why its priority was assigned, an illustrative example when available, relevant legal terms, and the exact source wording. New model reviews request an individual priority rationale; older reports explicitly identify when that rationale was not saved. Local-rule priorities are labelled as checklist presets.

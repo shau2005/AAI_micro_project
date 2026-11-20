@@ -70,9 +70,33 @@ def models():
     supported = available_models()
     return {"models": supported, "default": default_model(supported)}
 
+EXPLANATION_FIELDS = ("simple_explanation", "severity_reason", "practical_example", "source_explanation", "perspective_note")
+REVIEW_EXPLANATION_INSTRUCTIONS = (
+    "Write claim, recommendation and explanations in short, everyday sentences for a reader with no legal training. "
+    "Explain legal terms when first used. For every finding provide simple_explanation (what the clause means and the concern), "
+    "severity_reason (why THIS priority fits THIS party, based on quoted wording, possible impact, conditions and uncertainty), "
+    "practical_example (a short hypothetical explicitly labelled as an example, never an alleged fact), "
+    "source_explanation (which exact words support the concern and what the quote does not establish), and "
+    "perspective_note (who benefits from the suggested change and who takes on extra responsibility; use an empty string if unnecessary). "
+    "Use this priority rubric: CRITICAL for a potentially fundamental or urgent issue; HIGH for a potentially serious material consequence; "
+    "MEDIUM for a concern needing clarification whose material effect depends on circumstances or other terms; LOW for a lower-priority detail. "
+    "Do not equate the presence of a clause with a defect, or claim a numerical likelihood, verified legal breach or existing title problem without evidence. "
+    "Assess the complete supplied wording and any protections elsewhere before claiming a gap. Explain why the chosen level fits rather than repeating its name. "
+    "Keep each side's recommendations aligned with that party's interests. In a sale deed, vendor means seller (giver) and vendee means buyer (acceptor). "
+    "Broadening seller indemnity normally increases the seller's responsibility and benefits the buyer; do not present that alone as a seller-protective fix. "
+)
+
+
+def finding_explanation_fields(item):
+    return {name: str(item.get(name) or "").strip() for name in EXPLANATION_FIELDS}
+
+
 def full_contract_review(chunks, question, model, party="", perspective="", contract_type="", jurisdiction=""):
     if not model: return None
     schema={"type":"object","properties":{"findings":{"type":"array","items":{"type":"object","properties":{"category":{"type":"string"},"severity":{"type":"string","enum":["CRITICAL","HIGH","MEDIUM","LOW"]},"claim":{"type":"string"},"page":{"type":"integer"},"clause":{"type":"string"},"quote":{"type":"string"},"reasoning":{"type":"string"},"recommendation":{"type":"string"},"proposed_language":{"type":"string"},"confidence":{"type":"number"}},"required":["category","severity","claim","page","clause","quote","reasoning","recommendation","proposed_language","confidence"]}}},"required":["findings"]}
+    item_schema=schema["properties"]["findings"]["items"]
+    item_schema["properties"].update({name:{"type":"string"} for name in EXPLANATION_FIELDS})
+    item_schema["required"].extend(EXPLANATION_FIELDS)
     contract_text="\n\n".join(
         f"[PAGE {chunk.page_start} | CLAUSE {chunk.clause or 'unlabeled'} | CHUNK {chunk.chunk_id}]\n{chunk.text}"
         for chunk in chunks
@@ -86,6 +110,7 @@ def full_contract_review(chunks, question, model, party="", perspective="", cont
             "terms not identified in the indexed text. Do not invent facts, page numbers, quotes, legal obligations, or missing clauses. Return JSON matching the schema exactly.\n\n"
             f"Review request: {question}\nParty represented: {party or 'not specified'}\nPerspective: {perspective or 'not specified'}\n"
             f"Contract type: {contract_type or 'not specified'}\nJurisdiction: {jurisdiction or 'not specified'}\n\nCONTRACT_TEXT:\n{contract_text}")
+    prompt=REVIEW_EXPLANATION_INSTRUCTIONS+"\n"+prompt
     result=generate(prompt,schema,model,temperature=0)
     if not result: return None
     findings=[]
@@ -94,7 +119,7 @@ def full_contract_review(chunks, question, model, party="", perspective="", cont
         source,evidence_quote=find_source_evidence(quote,chunks)
         if not source: continue
         evidence=Evidence(page=source.page_start,clause=source.clause,quote=evidence_quote,chunk_id=source.chunk_id)
-        finding=Finding(finding_id=f"R-{__import__('uuid').uuid4().hex[:8].upper()}",category=str(item.get("category","GENERAL")),severity=str(item.get("severity","MEDIUM")).upper(),claim=str(item.get("claim","Contract language requires review.")),evidence=[evidence],reasoning=str(item.get("reasoning","")),recommendation=str(item.get("recommendation","")),proposed_language=str(item.get("proposed_language","")),confidence=float(item.get("confidence",.8)),requires_human_review=str(item.get("severity","MEDIUM")).upper() in {"HIGH","CRITICAL"},verification_status="pending")
+        finding=Finding(finding_id=f"R-{__import__('uuid').uuid4().hex[:8].upper()}",category=str(item.get("category","GENERAL")),severity=str(item.get("severity","MEDIUM")).upper(),claim=str(item.get("claim","Contract language requires review.")),evidence=[evidence],reasoning=str(item.get("reasoning","")),recommendation=str(item.get("recommendation","")),proposed_language=str(item.get("proposed_language","")),confidence=float(item.get("confidence",.8)),requires_human_review=str(item.get("severity","MEDIUM")).upper() in {"HIGH","CRITICAL"},verification_status="pending",**finding_explanation_fields(item))
         if valid_evidence(finding,chunks):
             finding.verification_status="verified"
             findings.append(finding)
@@ -110,6 +135,8 @@ def full_contract_dual_review(chunks, question, model, party="", contract_type="
         "quote":{"type":"string"},"reasoning":{"type":"string"},"recommendation":{"type":"string"},
         "proposed_language":{"type":"string"},"confidence":{"type":"number"}},
         "required":["category","severity","claim","page","clause","quote","reasoning","recommendation","proposed_language","confidence"]}}
+    finding_schema["items"]["properties"].update({name:{"type":"string"} for name in EXPLANATION_FIELDS})
+    finding_schema["items"]["required"].extend(EXPLANATION_FIELDS)
     schema={"type":"object","properties":{"contract_giver":finding_schema,"contract_acceptor":finding_schema},"required":["contract_giver","contract_acceptor"]}
     contract_text="\n\n".join(f"[PAGE {chunk.page_start} | CLAUSE {chunk.clause or 'unlabeled'} | CHUNK {chunk.chunk_id}]\n{chunk.text}" for chunk in chunks)
     prompt=("You are a senior contract review lawyer. Review the complete supplied evidence from BOTH parties' positions in this single response. "
@@ -120,6 +147,7 @@ def full_contract_dual_review(chunks, question, model, party="", contract_type="
             "Government search results are legal research leads, separate from contract evidence. Only use a rule when the source summary supports it, identify the source in reasoning, and do not state an amendment is in force unless commencement is verified. If no useful source was retrieved, assess contract wording without claiming current law was checked. "
             "Return JSON matching the schema exactly.\n\n"
             f"Review request: {question}\nParty represented: {party or 'not specified'}\nContract type: {contract_type or 'not specified'}\nJurisdiction: {jurisdiction or 'not specified'}\n\nOFFICIAL-SOURCE RESEARCH:\n{legal_context}\n\nCONTRACT_TEXT:\n{contract_text}")
+    prompt=REVIEW_EXPLANATION_INSTRUCTIONS+"\n"+prompt
     result=generate(prompt,schema,model,temperature=0)
     if result is None: return None
     reviews={"contract_giver":[],"contract_acceptor":[]}
@@ -135,7 +163,7 @@ def full_contract_dual_review(chunks, question, model, party="", contract_type="
                 evidence=[Evidence(page=source.page_start,clause=source.clause,quote=evidence_quote,chunk_id=source.chunk_id)],
                 reasoning=str(item.get("reasoning","")),recommendation=str(item.get("recommendation","")),
                 proposed_language=str(item.get("proposed_language","")),confidence=float(item.get("confidence",.8)),
-                requires_human_review=severity in {"HIGH","CRITICAL"},verification_status="pending")
+                requires_human_review=severity in {"HIGH","CRITICAL"},verification_status="pending",**finding_explanation_fields(item))
             if valid_evidence(finding,chunks):
                 finding.verification_status="verified"
                 reviews[role].append(finding)
@@ -300,6 +328,9 @@ def local_rule_review(chunks):
             claim=f"The contract contains {category.lower()} language requiring review.",
             evidence=[Evidence(page=source.page_start,clause=source.clause,quote=quote,chunk_id=source.chunk_id)],
             reasoning="Generated by the offline rule-based baseline; confirm the full clause before relying on this lead.",
+            simple_explanation=f"The local checker found wording about {category.lower()}. This is a reminder to check that topic, not confirmation that the contract has a defect.",
+            severity_reason=f"The local checker assigns {severity} priority automatically to {category.lower()} wording. It has not assessed the likely size or chance of a loss for this particular clause.",
+            source_explanation="The quoted passage contains wording that triggered the local checklist. Read the full clause and related clauses before deciding whether there is a problem.",
             recommendation=recommendation,confidence=.55,requires_human_review=severity in {"HIGH","CRITICAL"},verification_status="verified"))
     return findings
 
@@ -332,6 +363,15 @@ def contracts(x_workspace_id: str = Header(default="default")):
 def get_contract(cid:str,x_workspace_id: str = Header(default="default")):
     try: return scoped_meta(cid,x_workspace_id)
     except KeyError: raise HTTPException(404,"Contract not found")
+@app.delete("/api/contracts/{cid}")
+def delete_contract(cid:str,x_workspace_id: str = Header(default="default")):
+    try: meta=scoped_meta(cid,x_workspace_id)
+    except KeyError: raise HTTPException(404,"Contract not found")
+    if meta.processing_status == "indexing" or (meta.processing_status != "failed" and meta.analysis_status in {"queued", "running"}):
+        raise HTTPException(409,"This contract is still being processed. Wait for the review to finish before deleting it.")
+    store.delete_contract(cid)
+    return {"status":"deleted","contract_id":cid}
+
 @app.get("/api/contracts/{cid}/document")
 def document(cid:str,x_workspace_id: str = Header(default="default")):
     try: meta=scoped_meta(cid,x_workspace_id)

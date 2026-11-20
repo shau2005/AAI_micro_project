@@ -375,3 +375,26 @@ a[aria-disabled="true"] { opacity: .6; cursor: progress; }
 @media(prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior: auto !important; transition: none !important; } }
 
 .review-status.is-local{background:#fff1cf;color:#765200}
+
+.chat-notice { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 20px; color: #7c4c12; background: #fff7e8; border-radius: 10px; margin: 12px 0; }
+.chat-notice button { border: 1px solid currentColor; border-radius: 6px; padding: 8px 12px; color: inherit; background: transparent; cursor: pointer; }
+
+.delete-contract { flex: none; display: grid; place-items: center; width: 34px; height: 36px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: #b9cbd5; cursor: pointer; }
+.delete-contract:hover:not(:disabled) { background: #7c302d; color: #fff0eb; border-color: #cf8e81; }
+.delete-contract:focus-visible { outline: 2px solid #8bdfc6; outline-offset: 2px; }
+.delete-contract:disabled { opacity: .35; cursor: not-allowed; }
+.delete-error { padding: 12px; color: #ffe0d9; background: #713630; border-radius: 8px; font-size: .875rem; }
+
+.finding-explanation-content { display: grid; gap: 22px; padding-top: 20px; }
+.finding-explanation-content section { min-width: 0; }
+.finding-explanation-content h4 { margin: 0 0 8px; font-size: 1rem; color: #203e4a; }
+.finding-explanation-content section>p { margin: 0 0 8px; line-height: 1.75; }
+.finding-priority-reason { padding: 18px 20px; border: 1px solid #ebd9ae; border-radius: 12px; background: #fffbf1; }
+.finding-perspective-note { padding: 18px 20px; border-left: 4px solid #3d8091; border-radius: 8px; background: #edf6f8; }
+.finding-glossary { margin: 0; display: grid; gap: 10px; }
+.finding-glossary div { display: grid; grid-template-columns: minmax(120px, 160px) 1fr; gap: 16px; line-height: 1.6; }
+.finding-glossary dt { color: #294653; font-weight: 650; }
+.finding-glossary dd { margin: 0; color: #536b78; }
+.finding-explanation .source-caption { display: block; font-size: .8125rem; color: #42705e; margin-bottom: 10px; }
+.original-finding-reasoning { border-top: 1px solid #e1e9ee; padding-top: 16px; }
+@media (max-width: 600px) { .finding-glossary div { grid-template-columns: 1fr; gap: 2px; }.finding-priority-reason,.finding-perspective-note { padding: 14px; } }

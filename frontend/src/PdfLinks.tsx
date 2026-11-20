@@ -3,10 +3,10 @@ import {createPdfStore} from './pdf-store';
 
 const PdfContext = createContext<ReturnType<typeof createPdfStore> | null>(null);
 
-export function PdfProvider({apiBase, workspaceId, children}: {
-  apiBase: string; workspaceId: string; children: React.ReactNode;
+export function PdfProvider({apiBase, workspaceId, revision = 0, children}: {
+  apiBase: string; workspaceId: string; revision?: number; children: React.ReactNode;
 }) {
-  const store = useMemo(() => createPdfStore({apiBase, workspaceId}), [apiBase, workspaceId]);
+  const store = useMemo(() => createPdfStore({apiBase, workspaceId}), [apiBase, workspaceId, revision]);
   useEffect(() => () => store.dispose(), [store]);
   return <PdfContext.Provider value={store}>{children}</PdfContext.Provider>;
 }

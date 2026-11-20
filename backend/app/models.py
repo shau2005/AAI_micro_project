@@ -11,6 +11,11 @@ class Finding(BaseModel):
     finding_id: str; category: str; severity: str; claim: str
     evidence: list[Evidence] = Field(default_factory=list)
     reasoning: str = ""; recommendation: str = ""; proposed_language: str = ""; confidence: float = 0.0
+    simple_explanation: str = ""
+    severity_reason: str = ""
+    practical_example: str = ""
+    source_explanation: str = ""
+    perspective_note: str = ""
     requires_human_review: bool = False; verification_status: str = "pending"
 class ReviewRequest(BaseModel):
     question: str = "Review this contract for material legal and commercial risks."
