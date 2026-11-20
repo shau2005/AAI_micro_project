@@ -375,3 +375,18 @@ a[aria-disabled="true"] { opacity: .6; cursor: progress; }
 @media(prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior: auto !important; transition: none !important; } }
 
 .review-status.is-local{background:#fff1cf;color:#765200}
+
+/* MetadataAgent key-facts panel */
+.metadata-panel{display:grid;gap:14px}
+.metadata-card{border:1px solid var(--line, #d9e1e7);border-radius:12px;padding:12px 14px;background:var(--panel, #fff)}
+.metadata-card h3{margin:0 0 8px;font-size:.95rem}
+.metadata-card ul{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.metadata-card li{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 10px;font-size:.88rem}
+.metadata-card li span{color:var(--muted, #5c6b77);min-width:150px}
+.metadata-card li em{flex-basis:100%;font-style:normal;color:var(--muted, #5c6b77);font-size:.8rem}
+.metadata-cite{margin-left:auto;padding:1px 6px;border-radius:6px;background:rgba(20,44,59,.08);cursor:help}
+.metadata-relations li span.metadata-arrow{min-width:0;color:var(--accent, #1f6f8b)}
+.metadata-card li.is-missing{color:#a3412b}
+.metadata-card li.is-present svg{color:#2f7d4f}
+.metadata-warning,.metadata-empty{margin:0;font-size:.88rem;color:var(--muted, #5c6b77);display:flex;gap:6px;align-items:center}
+@media (max-width:640px){.metadata-card li span{min-width:0;flex-basis:100%}}

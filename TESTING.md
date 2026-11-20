@@ -10,7 +10,13 @@ python -m pip install -r backend/requirements.txt
 python -m pytest backend/tests -q
 ```
 
-The current backend tests cover security-sensitive request validation. The
+The backend tests cover security-sensitive request validation, review
+fallbacks and timeouts, the **MetadataAgent** (`test_metadata_agent.py`: roles,
+normalised dates, Indian-format amounts, relationships, quote grounding,
+required details, and rejection of ungrounded model values) and **OCR**
+(`test_ocr.py`). Scanned copies of the sample contracts are generated inside the
+tests. The live OCR tests run only when the Tesseract engine is installed and
+check that metadata from the OCR text matches the digital text exactly. The
 sample contracts in [`testing contracts/`](testing%20contracts/) can be used
 for manual upload and review checks.
 

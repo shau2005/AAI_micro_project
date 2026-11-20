@@ -5,6 +5,7 @@ class Chunk(BaseModel):
     chunk_id: str; contract_id: str; page_start: int; page_end: int
     section: str = ""; clause: str = ""; heading: str = ""; text: str
     token_estimate: int = 0
+    extraction: str = "text"  # "text" (digital PDF text) or "ocr" (read from a scanned page)
 class Evidence(BaseModel):
     page: int; clause: str = ""; quote: str; chunk_id: str = ""
 class Finding(BaseModel):

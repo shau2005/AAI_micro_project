@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173"
     data_dir: Path = Path("./data")
     max_retries: int = 2
+    enable_ocr: bool = True
+    tesseract_cmd: str | None = None
+    ocr_languages: str = "eng"
+    ocr_dpi: int = Field(default=300, ge=100, le=600)
+    ocr_min_chars: int = Field(default=25, ge=0)
     review_context_chars: int = 500000
     top_k_bm25: int = 30; top_k_vector: int = 30; top_k_rerank: int = 8
     model_config = SettingsConfigDict(env_file=PROJECT_ROOT / ".env", env_prefix="", extra="ignore")
